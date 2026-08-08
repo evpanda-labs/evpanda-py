@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "evpanda"
+dynamic = ["version"]
+description = "EVPanda SDK — passive OCPI/OCPP traffic capture for embedding in OCPI servers and OCPP CSMS."
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "EVPanda" }]
+keywords = [
+  "ocpi",
+  "ocpp",
+  "ev-charging",
+  "cpo",
+  "emsp",
+  "observability",
+  "telemetry",
+  "sdk",
+  "evpanda",
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Libraries",
+  "Topic :: System :: Monitoring",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/evpanda-labs/evpanda-py"
+Repository = "https://github.com/evpanda-labs/evpanda-py"
+Issues = "https://github.com/evpanda-labs/evpanda-py/issues"
+
+[project.optional-dependencies]
+# zstd is optional: absent, the transport falls back to gzip.
+zstd = ["zstandard>=0.22"]
+dev = ["ruff", "mypy", "pytest", "zstandard>=0.22"]
+
+[tool.hatch.version]
+path = "src/evpanda/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/evpanda"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+
+[[tool.mypy.overrides]]
+module = ["zstandard"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
