@@ -2,25 +2,9 @@
 
 [![CI](https://github.com/evpanda-labs/evpanda-py/actions/workflows/ci.yml/badge.svg)](https://github.com/evpanda-labs/evpanda-py/actions/workflows/ci.yml)
 
-Passive OCPI / OCPP traffic capture for Python — a functional port of the
-[evpanda Node SDK](https://github.com/evpanda-labs/evpanda-node). Embed it in
-your OCPI server or OCPP CSMS; it records protocol messages, buffers them
-in-process, and ships them in batches to the EVPanda ingestion API.
-
-> **It never gets in your way.** The SDK will not block your request path,
-> raise into your handlers, crash your process, or grow memory unbounded.
-> If it's under stress or the network is down it drops data — it never
-> degrades your application.
-
-- **Zero required dependencies** — HTTP, gzip, JSON, threading and logging
-  are all stdlib. [`zstandard`](https://pypi.org/project/zstandard/) is an
-  optional extra; without it the transport falls back to gzip.
-- **Python ≥ 3.12.**
-
-> **Status.** The OCPI and OCPP clients, redaction, buffering and transport
-> are complete and tested. The only unported piece is the OCPI framework
-> adapters (Flask/FastAPI/requests-style wrappers) — until they land,
-> capture through the client methods below.
+Python SDK for EVPanda. Embed it in your OCPI server or OCPP CSMS; 
+it records protocol messages, buffers them in-process, and ships them 
+in batches to the EVPanda ingestion API.
 
 ## Install
 
@@ -145,29 +129,6 @@ default, never raises.
 Intervals are float **seconds** — Python's unit for `time.sleep`,
 `Event.wait` and socket timeouts — where the Node SDK uses milliseconds.
 
-## Behavior
-
-- **Batched delivery.** Messages flush when the buffer reaches 1000 or on
-  `flush_interval`, whichever comes first; each POST carries at most 1000
-  records.
-- **Backpressure = drop-oldest.** If the upstream is slow or down, the ring
-  caps at `buffer_capacity` and discards the oldest. Your app never blocks.
-- **Redaction at the chokepoint.** Every capture path — adapter or
-  primitive — goes through one validate → cap → redact step before the
-  queue. OCPI keeps a **header allowlist** (`ocpi_allowed_headers` extends
-  it, never shrinks it — `Authorization`, `Cookie`, `X-API-Key` and anything
-  else unlisted fall off) and masks the `token` field on `/credentials`
-  bodies; OCPP frames are captured verbatim today, behind a seam ready for
-  masking.
-- **Resilient transport.** Bounded retry (max 5 attempts) with capped
-  exponential backoff + full jitter on other status / network errors;
-  permanent rejections (400/401/413) are dropped without retry storms.
-  Payloads under 1 KiB are sent uncompressed.
-- **Graceful shutdown.** `close()` flushes what's buffered within
-  `drain_timeout`, then stops. Idempotent, and it swaps in an inert engine
-  first so post-close calls are safe no-ops. If the deadline elapses with
-  messages still buffered it logs a warning (when `debug=True`).
-
 ## Development
 
 ```sh
@@ -179,6 +140,3 @@ python3.12 -m venv .venv
 .venv/bin/mypy src
 .venv/bin/pytest -q
 ```
-
-Porting decisions and the wire-contract parity notes against the Node SDK
-live in [PORTING_NOTES.md](PORTING_NOTES.md).
