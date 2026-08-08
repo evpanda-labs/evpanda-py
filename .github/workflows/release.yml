@@ -1,0 +1,74 @@
+# Publishes evpanda to PyPI when a GitHub Release is published.
+#
+# Prerequisites (one-time, no secrets):
+#   - PyPI trusted publishing: on pypi.org, add a "trusted publisher" for
+#     project `evpanda` pointing at repo `evpanda-labs/evpanda-py`,
+#     workflow `release.yml`, environment `pypi`.
+#   - A GitHub environment named `pypi` on this repo (Settings →
+#     Environments); optionally add required reviewers as a publish gate.
+#   - Bump `__version__` in src/evpanda/__init__.py before tagging; PyPI
+#     rejects re-publishing an existing version.
+#
+# Publishing uses OIDC (id-token: write) — no API token to store or rotate.
+
+name: Release
+
+on:
+  release:
+    types: [published]
+  # Manual run from the Actions tab (publishes the version currently in
+  # src/evpanda/__init__.py; PyPI rejects an existing version, so bump first).
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Check and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e ".[dev]" build twine
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format
+        run: ruff format --check .
+
+      - name: Mypy
+        run: mypy src
+
+      - name: Pytest
+        run: pytest -q
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Twine check
+        run: twine check --strict dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
