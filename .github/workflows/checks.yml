@@ -1,0 +1,94 @@
+# The quality gate, defined once and called by both build.yml (pushes and
+# pull requests) and release.yml (tags). Keeping it in one place is the
+# point: a release must clear exactly the same bar as a pull request, and
+# two copies of these steps would eventually disagree.
+name: Checks
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor from pyproject's requires-python, plus every release
+        # since. The SDK has no runtime dependencies, so this is the whole
+        # compatibility surface.
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format
+        run: ruff format --check .
+
+      - name: Mypy
+        run: mypy
+
+      - name: Pytest
+        run: pytest
+
+  # The extras are optional at runtime, so prove the SDK works without
+  # them: an import of evpanda must not need httpx, requests or zstandard,
+  # and the core suite must pass on a bare install.
+  bare:
+    name: Test without extras
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install the package and the test runner only
+        run: pip install -e . pytest
+
+      - name: Import cleanly
+        run: python -c "import evpanda, evpanda.ocpi; print(evpanda.__version__)"
+
+      # The suites that need an extra skip themselves; everything else must
+      # pass exactly as it does with the extras installed.
+      - name: Pytest
+        run: pytest
+
+  # The repo publishes to PyPI — prove the sdist/wheel build and their
+  # metadata on every push, not just at release time.
+  package:
+    name: Package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: pip install build twine
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Twine check
+        run: twine check --strict dist/*
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/

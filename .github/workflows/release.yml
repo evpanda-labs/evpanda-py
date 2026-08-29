@@ -1,74 +1,127 @@
-# Publishes evpanda to PyPI when a GitHub Release is published.
+# Publishes evpanda to PyPI when a semver tag is pushed, and cuts the
+# matching GitHub Release.
+#
+# To release:
+#   1. bump __version__ in src/evpanda/__init__.py, and merge it
+#   2. git tag v0.2.0 && git push origin v0.2.0
+#
+# The tag is the trigger, so the version in the tree and the version in the
+# tag cannot drift — validate-tag fails the release if they disagree. PyPI
+# rejects re-publishing an existing version, so a bump is not optional.
 #
 # Prerequisites (one-time, no secrets):
-#   - PyPI trusted publishing: on pypi.org, add a "trusted publisher" for
+#   - PyPI trusted publishing: on pypi.org, add a trusted publisher for
 #     project `evpanda` pointing at repo `evpanda-labs/evpanda-py`,
 #     workflow `release.yml`, environment `pypi`.
 #   - A GitHub environment named `pypi` on this repo (Settings →
 #     Environments); optionally add required reviewers as a publish gate.
-#   - Bump `__version__` in src/evpanda/__init__.py before tagging; PyPI
-#     rejects re-publishing an existing version.
 #
 # Publishing uses OIDC (id-token: write) — no API token to store or rotate.
-
 name: Release
 
 on:
-  release:
-    types: [published]
-  # Manual run from the Actions tab (publishes the version currently in
-  # src/evpanda/__init__.py; PyPI rejects an existing version, so bump first).
-  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
 
 jobs:
-  build:
-    name: Check and build
+  validate-tag:
+    name: Validate tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
         with:
-          python-version: "3.12"
+          fetch-depth: 0
 
-      - name: Install
-        run: pip install -e ".[dev]" build twine
+      - name: Check the tag is a PEP 440 / semver version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+((a|b|rc)[0-9]+)?$'; then
+            echo "::error::'$TAG' is not a release version (want vX.Y.Z, vX.Y.Zrc1, …)"
+            exit 1
+          fi
+          echo "$TAG is a valid version tag"
 
-      - name: Ruff lint
-        run: ruff check .
+      - name: Check the tag matches __version__
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(python -c "
+          import pathlib, re
+          source = pathlib.Path('src/evpanda/__init__.py').read_text()
+          print(re.search(r'__version__ = \"([^\"]+)\"', source).group(1))
+          ")"
+          if [ "$version" != "${TAG#v}" ]; then
+            echo "::error::__version__ is $version but the tag is $TAG — bump one of them"
+            exit 1
+          fi
+          echo "__version__ ($version) matches $TAG"
 
-      - name: Ruff format
-        run: ruff format --check .
+      - name: Check the tag is on master
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin master:refs/remotes/origin/master
+          if ! git merge-base --is-ancestor "$TAG" origin/master; then
+            echo "::error::$TAG is not an ancestor of master — release from master only"
+            exit 1
+          fi
+          echo "$TAG is on master"
 
-      - name: Mypy
-        run: mypy src
-
-      - name: Pytest
-        run: pytest -q
-
-      - name: Build sdist + wheel
-        run: python -m build
-
-      - name: Twine check
-        run: twine check --strict dist/*
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
+  # The same gate a pull request clears, re-run against the tagged commit.
+  # It also builds the artifact the publish job uploads.
+  checks:
+    needs: validate-tag
+    uses: ./.github/workflows/checks.yml
 
   publish:
     name: Publish to PyPI
-    needs: build
+    needs: checks
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      id-token: write
+      id-token: write # PyPI trusted publishing, via OIDC
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
 
       - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  github-release:
+    name: Create the GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # required to create the release
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # release notes are generated from history
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create it
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Pre-1.0 and pre-release tags are marked as such so consumers are
+          # not told an unstable version is the latest stable one.
+          flags=(--generate-notes --title "$TAG")
+          case "$TAG" in
+            v0.*|*a[0-9]*|*b[0-9]*|*rc[0-9]*) flags+=(--prerelease) ;;
+          esac
+          gh release create "$TAG" "${flags[@]}" dist/*
