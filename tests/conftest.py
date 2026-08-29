@@ -1,193 +1,261 @@
-"""Shared fixtures: a mock ingestion upstream plus helpers that assemble the
-core the way the protocol clients will (resolve → buffer → transport →
-worker).
-"""
+"""Shared fixtures: a stub ingestion server, and clients wired to it."""
 
 from __future__ import annotations
 
 import gzip
 import json
+import logging
 import threading
-import time
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import pytest
 
-from evpanda.buffer import RingBuffer
-from evpanda.config import OCPIConfig, OCPPConfig, resolve_ocpi_config, resolve_ocpp_config
-from evpanda.transport import Transport
-from evpanda.types import HttpExchange, OCPIDirection, OCPIMessage, RoamingIdentity
-from evpanda.worker import Worker
+import evpanda
 
 
-class _CIHeaders:
-    """Case-insensitive header view (HTTP headers are case-insensitive)."""
-
-    def __init__(self, headers: dict[str, str]) -> None:
-        self._h = {k.lower(): v for k, v in headers.items()}
-
-    def get(self, key: str) -> str | None:
-        return self._h.get(key.lower())
-
-
+@dataclass
 class Received:
-    def __init__(self, path: str, headers: dict[str, str], records: list[dict[str, Any]]):
-        self.path = path
-        self.headers = _CIHeaders(headers)
-        self.records = records
+    """One request the stub server accepted."""
 
-
-class MockUpstream:
-    """Stands in for the ingestion API; decodes the body and keeps every POST."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self.received: list[Received] = []
-        self.status = 200
-        self._server: ThreadingHTTPServer | None = None
-        self._thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        mock = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def log_message(self, *args: Any) -> None:  # silence
-                pass
-
-            def do_POST(self) -> None:  # noqa: N802
-                length = int(self.headers.get("Content-Length", "0"))
-                raw = self.rfile.read(length)
-                enc = (self.headers.get("content-encoding") or "").lower()
-                if enc == "gzip":
-                    raw = gzip.decompress(raw)
-                elif enc == "zstd":
-                    import zstandard
-
-                    raw = zstandard.ZstdDecompressor().decompress(raw)
-                try:
-                    records = json.loads(raw).get("messages") or []
-                except Exception:
-                    records = []
-                with mock._lock:
-                    mock.received.append(Received(self.path, dict(self.headers), records))
-                    status = mock.status
-                self.send_response(status)
-                self.end_headers()
-                self.wfile.write(b'{"captured":0,"failed":0}')
-
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-        self._thread.start()
+    path: str
+    headers: dict[str, str]
+    body: dict[str, Any]
 
     @property
-    def url(self) -> str:
-        assert self._server is not None
-        port = self._server.server_address[1]
-        return f"http://127.0.0.1:{port}"
+    def messages(self) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = self.body["messages"]
+        return messages
 
-    def set_status(self, s: int) -> None:
+
+@dataclass
+class IngestServer:
+    """A stub of the ingestion API, recording what the SDK sends it."""
+
+    url: str
+    received: list[Received] = field(default_factory=list)
+    #: Statuses to serve before falling back to 200, one per request.
+    statuses: list[int] = field(default_factory=list)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def next_status(self) -> int:
         with self._lock:
-            self.status = s
+            return self.statuses.pop(0) if self.statuses else 200
 
-    def posts(self, path: str) -> list[Received]:
+    def record(self, item: Received) -> None:
         with self._lock:
-            return [r for r in self.received if r.path == path]
+            self.received.append(item)
 
-    def records(self, path: str) -> list[dict[str, Any]]:
-        return [rec for r in self.posts(path) for rec in r.records]
+    @property
+    def messages(self) -> list[dict[str, Any]]:
+        """Every message from every request, in order."""
+        with self._lock:
+            return [m for request in self.received for m in request.messages]
 
-    def ocpi_posts(self) -> list[Received]:
-        return self.posts("/v1/ocpi")
+    def wait_for_messages(self, count: int, timeout: float = 5.0) -> list[dict[str, Any]]:
+        """Block until at least ``count`` messages have arrived."""
+        deadline = threading.Event()
+        waited = 0.0
+        while waited < timeout:
+            messages = self.messages
+            if len(messages) >= count:
+                return messages
+            deadline.wait(0.02)
+            waited += 0.02
+        raise AssertionError(f"expected {count} messages, saw {len(self.messages)}")
 
-    def ocpi_records(self) -> list[dict[str, Any]]:
-        return self.records("/v1/ocpi")
 
-    def close(self) -> None:
-        if self._server is not None:
-            self._server.shutdown()
-            self._server.server_close()
+def _decompress(raw: bytes, encoding: str | None) -> bytes:
+    if encoding == "gzip":
+        return gzip.decompress(raw)
+    if encoding == "zstd":
+        import zstandard
+
+        return bytes(zstandard.decompress(raw))
+    return raw
 
 
 @pytest.fixture
-def mock() -> Iterator[MockUpstream]:
-    m = MockUpstream()
-    m.start()
-    yield m
-    m.close()
+def ingest() -> Iterator[IngestServer]:
+    """A stub ingestion API on localhost, torn down after the test."""
+    state: IngestServer | None = None
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self) -> None:  # BaseHTTPRequestHandler's spelling
+            assert state is not None
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = _decompress(self.rfile.read(length), self.headers.get("Content-Encoding"))
+            status = state.next_status()
+            if status == 200:
+                state.record(
+                    Received(
+                        path=self.path,
+                        headers={k.lower(): v for k, v in self.headers.items()},
+                        body=json.loads(raw),
+                    )
+                )
+                payload = json.dumps({"captured": len(json.loads(raw)["messages"]), "failed": 0})
+            else:
+                payload = json.dumps({"error": "stub"})
+            body = payload.encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: Any) -> None:
+            """Keep the test output clean."""
+
+    class Server(ThreadingHTTPServer):
+        #: Keep-alive connections must not hold the teardown open.
+        daemon_threads = True
+
+    server = Server(("127.0.0.1", 0), Handler)
+    host, port = server.server_address[:2]
+    state = IngestServer(url=f"http://{host}:{port}")
+    thread = threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True)
+    thread.start()
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 @pytest.fixture
-def workers() -> Iterator[Callable[..., Worker]]:
-    """Build armed workers and close them all at the end of the test."""
-    built: list[Worker] = []
-
-    def build(config: OCPIConfig | OCPPConfig) -> Worker:
-        resolved = (
-            resolve_ocpi_config(config)
-            if isinstance(config, OCPIConfig)
-            else resolve_ocpp_config(config)
-        )
-        worker = Worker(RingBuffer(resolved.buffer_capacity), Transport(resolved), resolved)
-        worker.start()
-        built.append(worker)
-        return worker
-
-    yield build
-    for w in built:
-        w.close()
+def fast_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the real retry ladder out of the test suite's wall clock."""
+    monkeypatch.setattr("evpanda._transport.next_delay", lambda attempt: 0.001)
 
 
-def wait_for(predicate: Callable[[], bool], timeout: float) -> None:
-    deadline = time.monotonic() + timeout
-    while not predicate():
-        if time.monotonic() > deadline:
-            raise AssertionError("wait_for: timed out")
-        time.sleep(0.02)
+@pytest.fixture
+def logs(caplog: pytest.LogCaptureFixture) -> pytest.LogCaptureFixture:
+    """Capture the SDK's own log output."""
+    caplog.set_level(logging.DEBUG, logger="evpanda")
+    return caplog
 
 
-#: Stand-in for `evpanda.ocpi.redact`: drops the Authorization header so the
-#: tests can prove the chokepoint applies the redactor it is handed.
-def strip_authorization(msg: OCPIMessage) -> OCPIMessage:
-    data = msg.data
-    return OCPIMessage(
-        direction=msg.direction,
-        identity=msg.identity,
-        data=HttpExchange(
-            method=data.method,
-            url=data.url,
-            status_code=data.status_code,
-            request_headers={
-                k: v for k, v in data.request_headers.items() if k.lower() != "authorization"
-            },
-            response_headers=dict(data.response_headers),
-            request_body=data.request_body,
-            response_body=data.response_body,
-        ),
-    )
+@pytest.fixture(autouse=True)
+def _quiet_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the ambient environment out of every test's config resolution."""
+    monkeypatch.delenv(evpanda.API_KEY_ENV_VAR, raising=False)
+    monkeypatch.delenv(evpanda.LOG_MODE_ENV_VAR, raising=False)
 
 
-def identity_redactor(msg: Any) -> Any:
-    """Pass-through redactor, matching today's OCPP one."""
-    return msg
+def ocpi_client(ingest: IngestServer, **overrides: Any) -> evpanda.OCPIClient:
+    """An OCPI client pointed at the stub server."""
+    config = evpanda.OCPIConfig(endpoint=ingest.url, api_key="test-key", **overrides)
+    client = evpanda.start_ocpi(config)
+    assert client.error is None
+    return client
 
 
-def make_ocpi(i: int) -> OCPIMessage:
-    return OCPIMessage(
-        direction=OCPIDirection.IN,
-        identity=RoamingIdentity(
-            platform_id="acme",
-            platform_name="Acme Mobility",
-            tenant_id="t1",
-            tenant_name="Tenant One",
-        ),
-        data=HttpExchange(
-            method="POST",
-            url=f"/ocpi/2.2/cdrs/{i}",
-            status_code=200,
-            request_headers={"Authorization": "Bearer SECRET", "X-Trace": str(i)},
-            response_headers={"content-type": "application/json"},
-            request_body=f"body-{i}".encode(),
-        ),
-    )
+def ocpp_client(ingest: IngestServer, **overrides: Any) -> evpanda.OCPPClient:
+    """An OCPP client pointed at the stub server."""
+    config = evpanda.OCPPConfig(endpoint=ingest.url, api_key="test-key", **overrides)
+    client = evpanda.start_ocpp(config)
+    assert client.error is None
+    return client
+
+
+@dataclass
+class FakeCapturer:
+    """A Capturer that records instead of buffering.
+
+    It is what the adapter tests drive, so they exercise the adapter rather
+    than the pipeline behind it.
+    """
+
+    max_capture_bytes: int | None = 65536
+    inbound: list[tuple[Any, evpanda.HTTPExchange]] = field(default_factory=list)
+    outbound: list[tuple[Any, evpanda.HTTPExchange]] = field(default_factory=list)
+
+    def capture_inbound_message(self, identity: Any, data: evpanda.HTTPExchange) -> None:
+        self.inbound.append((identity, data))
+
+    def capture_outbound_message(self, identity: Any, data: evpanda.HTTPExchange) -> None:
+        self.outbound.append((identity, data))
+
+    def capturing(self) -> int | None:
+        return self.max_capture_bytes
+
+
+@dataclass
+class PartnerServer:
+    """A stand-in for a roaming partner's OCPI server."""
+
+    url: str
+    received: list[Received] = field(default_factory=list)
+
+
+@pytest.fixture
+def partner() -> Iterator[PartnerServer]:
+    """An HTTP server that answers with JSON and records what it was sent."""
+    state: PartnerServer | None = None
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _handle(self) -> None:
+            assert state is not None
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length)
+            state.received.append(
+                Received(
+                    path=self.path,
+                    headers={k.lower(): v for k, v in self.headers.items()},
+                    body={"raw": raw.decode("utf-8", "replace")},
+                )
+            )
+            body = json.dumps({"status_code": 1000, "data": []}).encode()
+            self.send_response(201 if self.command == "POST" else 200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_GET = _handle
+        do_POST = _handle
+
+        def log_message(self, *args: Any) -> None:
+            """Keep the test output clean."""
+
+    class Server(ThreadingHTTPServer):
+        daemon_threads = True
+
+    server = Server(("127.0.0.1", 0), Handler)
+    host, port = server.server_address[:2]
+    state = PartnerServer(url=f"http://{host}:{port}")
+    thread = threading.Thread(target=server.serve_forever, args=(0.01,), daemon=True)
+    thread.start()
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+PARTNER = evpanda.RoamingIdentity(platform_id="acme", platform_name="Acme Mobility")
+CHARGER = evpanda.ChargerIdentity(charger_id="CP-001")
+
+
+def exchange(**overrides: Any) -> evpanda.HTTPExchange:
+    """A plausible OCPI exchange, with fields overridable per test."""
+    fields: dict[str, Any] = {
+        "method": "POST",
+        "url": "/ocpi/2.2/cdrs",
+        "status_code": 201,
+        "request_headers": {"content-type": "application/json"},
+        "response_headers": {"content-type": "application/json"},
+        "request_body": b'{"id":"cdr-1"}',
+        "response_body": b'{"status_code":1000}',
+    }
+    fields.update(overrides)
+    return evpanda.HTTPExchange(**fields)

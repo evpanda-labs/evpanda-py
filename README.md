@@ -1,142 +1,322 @@
-# evpanda
+# evpanda-py
 
-[![CI](https://github.com/evpanda-labs/evpanda-py/actions/workflows/ci.yml/badge.svg)](https://github.com/evpanda-labs/evpanda-py/actions/workflows/ci.yml)
+[![CI](https://github.com/evpanda-labs/evpanda-py/actions/workflows/build.yml/badge.svg)](https://github.com/evpanda-labs/evpanda-py/actions/workflows/build.yml)
+[![PyPI](https://img.shields.io/pypi/v/evpanda.svg)](https://pypi.org/project/evpanda/)
 
-Python SDK for EVPanda. Embed it in your OCPI server or OCPP CSMS; 
-it records protocol messages, buffers them in-process, and ships them 
-in batches to the EVPanda ingestion API.
+Passive OCPI / OCPP traffic capture for Python. Embed it in your OCPI server or
+OCPP CSMS and it records protocol messages, buffers them in memory, and ships
+them in batches to the EVPanda ingestion API.
 
-## Install
+- **Non-blocking.** Capture calls never wait on the network and never raise
+  into your process.
+- **Bounded.** Memory is capped by a byte budget you set; under pressure the
+  SDK drops its own data rather than yours.
+- **Safe by default.** Secrets are stripped before anything is buffered.
+- **Small.** No runtime dependencies, one background thread per client.
+
+## Requirements
+
+Python 3.12 or later.
+
+## Installation
 
 ```sh
-pip install evpanda          # gzip
-pip install "evpanda[zstd]"  # + zstd (recommended)
+pip install evpanda
+```
+
+The SDK itself is stdlib-only. Three optional extras add a faster codec and the
+two outbound adapters:
+
+```sh
+pip install 'evpanda[zstd]'      # zstd instead of gzip for batch compression
+pip install 'evpanda[httpx]'     # evpanda.ocpi.HTTPXTransport
+pip install 'evpanda[requests]'  # evpanda.ocpi.RequestsAdapter
 ```
 
 ## Quick start
 
-**The protocol is the class.** There is no `network_type` switch:
-`OCPIClient` takes an `OCPIConfig`, `OCPPClient` an `OCPPConfig`. Common
-fields live on `BaseConfig`; per-protocol extensions add only what that
-protocol's client cares about.
+Pick the client for the protocol your service speaks. `start_ocpi` and
+`start_ocpp` always return a usable client — if the config is bad you get an
+inert one carrying the reason on `.error`, so a typo can't stop your service
+from booting.
 
-### OCPI
-
-`OCPIClient.start()` never raises — a bad config yields an inert no-op
-client, so it can't crash your boot.
-
-```python
-from evpanda import HttpExchange, OCPIClient, OCPIConfig, OCPIMessageInput
-from evpanda import RoamingIdentity
-
-panda = OCPIClient.start(
-    OCPIConfig(
-        endpoint="https://ingest.evpanda.io",
-        # api_key omitted ⇒ read from EVPANDA_API_KEY
-        ocpi_allowed_headers=["x-correlation-id"],  # extends the allowlist
-    )
-)
-try:
-    panda.capture_inbound_message(
-        OCPIMessageInput(  # partner → host
-            identity=RoamingIdentity(
-                platform_id="acme",
-                platform_name="Acme Mobility",
-                tenant_id="cpo-42",  # tenant is all-or-nothing
-                tenant_name="CPO 42",
-            ),
-            data=HttpExchange(
-                method="POST",
-                url="/ocpi/2.2/cdrs",
-                status_code=200,
-                request_headers={"content-type": "application/json"},
-                request_body=b'{"id":"..."}',
-            ),
-        )
-    )
-finally:
-    panda.close()  # flushes what's buffered, within drain_timeout
-```
-
-`capture_outbound_message` (host → partner) is the same call with the other
-direction; the method stamps `IN` / `OUT` for you.
+**The only thing you must supply is an API key.** Set `EVPANDA_API_KEY` in the
+environment, or pass `api_key` in the config. `endpoint` defaults to the
+production ingestion API, so leave it unset unless you're pointing at another
+environment.
 
 ### OCPP
 
-The recommended path is a **session handle** — it mints the `connection_id`
-and carries the identity, so per-frame calls carry neither:
+`connection()` returns a session handle that mints the connection ID and
+carries the charger identity, so per-frame calls need neither. It is also a
+context manager, so leaving the block records the disconnect.
 
 ```python
-from evpanda import ChargerIdentity, OCPPClient, OCPPConfig, OCPPDirection
+import evpanda
 
-panda = OCPPClient.start(OCPPConfig(endpoint="https://ingest.evpanda.io"))
+# endpoint defaults to production; api_key comes from EVPANDA_API_KEY
+panda = evpanda.start_ocpp()
+if panda.error:
+    log.warning("%s (running inert)", panda.error)
 
-# On WebSocket connect — records the connect and returns the handle.
-session = panda.connection(ChargerIdentity(charger_id="CP-001"))
-session.message('[2,"id","BootNotification",{}]', OCPPDirection.FROM_CP)
-session.disconnect()  # on socket close
+async def handle_charger(websocket):
+    identity = resolve_charger_identity(websocket)  # however your CSMS does it
+    if identity is None:
+        await websocket.close(code=1008)
+        return
 
-# Or scope it to a block — leaving the block records the disconnect:
-with panda.connection(ChargerIdentity(charger_id="CP-002")) as session:
-    session.message(frame, OCPPDirection.TO_CP)
+    with panda.connection(identity) as session:   # records the connect…
+        async for frame in websocket:             # …and the close on the way out
+            session.message(frame, evpanda.OCPPDirection.FROM_CP)
+
+            reply = handle_frame(frame)           # your CSMS logic
+            await websocket.send(reply)
+            session.message(reply, evpanda.OCPPDirection.TO_CP)
 ```
 
-`capture_connect` / `capture_message` / `capture_disconnect` are the flat
-primitives underneath, taking an `OCPPMessageInput`, for one-off capture.
-Frames may be `bytes` or `str` (encoded UTF-8).
+`direction` is from the charge point's perspective: `FROM_CP` for frames it
+sent you, `TO_CP` for frames you send it. Use one session per socket — its
+connection ID ties the connect, every frame and the disconnect into a single
+session, and a reconnect gets a fresh one.
 
-Capture is **non-blocking and never raises** — messages are buffered and
-delivered on a background daemon thread. One client serves one protocol.
+`capture_connect` / `capture_message` / `capture_disconnect` are the flat
+primitives underneath, for cases a session handle doesn't fit.
+
+### OCPI
+
+Two methods, one per direction. The method name sets the direction — there's no
+argument to get backwards.
+
+| Method | You are the… | Typical case |
+|---|---|---|
+| `capture_inbound_message` | server | A partner pushes a CDR to your endpoint |
+| `capture_outbound_message` | client | You pull a partner's locations |
+
+`identity` is always the **partner on the other side** — never your own
+platform.
+
+```python
+import evpanda
+
+panda = evpanda.start_ocpi()
+if panda.error:
+    log.warning("%s (running inert)", panda.error)
+
+panda.capture_inbound_message(
+    identity=evpanda.RoamingIdentity(platform_id="acme", platform_name="Acme Mobility"),
+    data=evpanda.HTTPExchange(
+        method="POST",
+        url="/ocpi/2.2/cdrs",
+        status_code=201,
+        request_headers={"content-type": "application/json"},
+        response_headers={"content-type": "application/json"},
+        request_body=request_bytes,     # bytes or str
+        response_body=response_bytes,
+    ),
+)
+```
+
+`status_code` and both bodies are optional; the header mappings may be left
+empty. Bodies are `bytes` (a `str` is encoded as UTF-8), and since `bytes` is
+immutable the SDK never has to copy what you hand it — a `bytearray` or
+`memoryview` is copied, so you can reuse your own buffer the moment the call
+returns.
+
+## HTTP adapters
+
+`evpanda.ocpi` wraps the HTTP layers your service already speaks, so you don't
+have to assemble exchanges yourself. Four adapters, one per layer:
+
+| Adapter | Direction | For |
+|---|---|---|
+| `evpanda.ocpi.wsgi.WSGIMiddleware` | inbound | Flask, Django, Pyramid, any WSGI app |
+| `evpanda.ocpi.asgi.ASGIMiddleware` | inbound | FastAPI, Starlette, Litestar, any ASGI app |
+| `evpanda.ocpi.HTTPXTransport` | outbound | `httpx` (`AsyncHTTPXTransport` for async) |
+| `evpanda.ocpi.RequestsAdapter` | outbound | `requests` |
+
+```python
+from evpanda.ocpi.asgi import ASGIMiddleware
+from evpanda.ocpi.wsgi import WSGIMiddleware
+
+app = ASGIMiddleware(app, panda)                     # FastAPI / Starlette
+app.wsgi_app = WSGIMiddleware(app.wsgi_app, panda)   # Flask
+```
+
+```python
+import httpx
+from evpanda.ocpi import HTTPXTransport
+
+client = httpx.Client(transport=HTTPXTransport(panda))
+```
+
+A request with no resolvable identity is served exactly as it would have
+been — it just isn't captured.
+
+### Telling the adapters who the partner is
+
+Stamp the identity wherever you already look the partner up. Inbound, that is
+the request's own mapping — the WSGI environ or the ASGI scope:
+
+```python
+from evpanda.ocpi import set_identity
+
+@app.middleware("http")
+async def authenticate(request, call_next):
+    partner = lookup_partner(request.headers.get("authorization"))
+    if partner is None:
+        return JSONResponse({"status_code": 2001}, status_code=401)
+    set_identity(request.scope, evpanda.RoamingIdentity(
+        platform_id=partner.id, platform_name=partner.name,
+    ))
+    return await call_next(request)
+```
+
+The mapping is read when the response finishes, so **mount order doesn't
+matter**: your auth layer can sit inside or outside the capture middleware and
+either way the identity is seen.
+
+Outbound, use the context manager — you have already looked the partner up to
+get their token:
+
+```python
+from evpanda.ocpi import use_identity
+
+with use_identity(evpanda.RoamingIdentity(platform_id=partner.id, platform_name=partner.name)):
+    response = client.post(f"{partner.url}/ocpi/2.2/sessions", json=payload,
+                           headers={"Authorization": f"Token {partner.token_b}"})
+```
+
+It is a `ContextVar`, so it is task-local in async code and thread-local in
+sync code. httpx also takes it per request:
+`client.get(url, extensions={"evpanda.identity": identity})`.
+
+Failing both, all four adapters read the `X-EVPanda-Platform-Id` /
+`X-EVPanda-Platform-Name` headers (plus optional `-Tenant-Id` / `-Tenant-Name`).
+The outbound adapters strip them before dispatch, so partners never see them.
+
+If identity lives somewhere else entirely — a client certificate, a path prefix
+— pass your own resolver:
+
+```python
+from evpanda.ocpi import RequestInfo
+
+def by_path(info: RequestInfo) -> evpanda.RoamingIdentity | None:
+    if not info.url.startswith("/partners/"):
+        return None                      # not captured
+    name = info.url.removeprefix("/partners/").split("/")[0]
+    return evpanda.RoamingIdentity(platform_id=name, platform_name=name)
+
+ASGIMiddleware(app, panda, resolver=by_path)
+```
 
 ## Identity
 
-Every message carries its own identity; the SDK validates it and silently
-drops what it can't attribute (it never raises back at you).
+Every message carries its own identity; messages the SDK can't attribute are
+dropped rather than shipped as orphans.
 
-- **OCPI →** `RoamingIdentity`: `platform_id` + `platform_name` required.
-- **OCPP →** `ChargerIdentity`: `charger_id` required.
-- `tenant_id` + `tenant_name` are optional but **all-or-nothing** — supply
-  both or neither.
+| Protocol | Type | Required fields |
+|---|---|---|
+| OCPI | `RoamingIdentity` | `platform_id`, `platform_name` |
+| OCPP | `ChargerIdentity` | `charger_id` |
 
-Identity is per message, not global config — one OCPI process can serve
-many platforms and tenants. OCPI identity lives in the partner's request
-headers, so you supply it per capture call; OCPP identity is known at
-connect time, so the session handle carries it for you.
-
-(The adapters' `OCPIResolver` contract — request context → identity — lands
-with the adapters themselves.)
+`tenant_id` and `tenant_name` are optional but **all-or-nothing** — set both or
+neither. Call `identity.valid()` to check one yourself.
 
 ## Configuration
 
-`endpoint` and `api_key` are **hard-required**: a bad value means the client
-runs inert rather than crashing your boot. Every other field is a tunable —
-an invalid value warns (only when `debug=True`) and falls back to its
-default, never raises.
+`api_key` is the only required field; it falls back to `$EVPANDA_API_KEY`.
+Everything else takes its default when left at `None`, and an out-of-range
+value falls back to that default with a warning rather than failing.
 
-| Field                  | Default            | Description                                                                            |
-|------------------------|--------------------|----------------------------------------------------------------------------------------|
-| `endpoint`             | —                  | Ingestion API base URL (`http(s)://…`).                                                |
-| `api_key`              | `$EVPANDA_API_KEY` | Sent as `X-API-Key`. Falls back to the env var when empty; one of the two must be set. |
-| `buffer_capacity`      | `10000`            | Ring buffer slots. Worst-case mem = `buffer_capacity × max_capture_bytes`.             |
-| `max_capture_bytes`    | `65536`            | Per-body / per-frame cap. An oversize body drops the whole message.                    |
-| `flush_interval`       | `5.0`              | Worker flush cadence, in **seconds**.                                                  |
-| `drain_timeout`        | `10.0`             | `close()` drain deadline, in seconds. An explicit value must be ≥ `5.0`.               |
-| `compression`          | `"zstd"`           | `"zstd"` (needs the optional extra, else gzip) or `"gzip"`.                            |
-| `debug`                | `False`            | Master log switch; default totally silent.                                             |
-| `logger`               | `None`             | `logging.Logger` used when `debug=True`; if `None`, `logging.getLogger("evpanda")`.    |
-| `ocpi_allowed_headers` | `[]`               | *(OCPIConfig only)* Extra headers to capture on top of the default allowlist.          |
+A missing key and a malformed `endpoint` are the only things `start_*` reports,
+and both are matchable — useful because a missing key is usually a deployment
+problem while a bad endpoint is a code one:
 
-Intervals are float **seconds** — Python's unit for `time.sleep`,
-`Event.wait` and socket timeouts — where the Node SDK uses milliseconds.
-
-## Development
-
-```sh
-python3.12 -m venv .venv
-.venv/bin/pip install -e ".[dev]"
-
-.venv/bin/ruff check .
-.venv/bin/ruff format --check .
-.venv/bin/mypy src
-.venv/bin/pytest -q
+```python
+panda = evpanda.start_ocpi(config)
+if isinstance(panda.error, evpanda.APIKeyError):
+    raise SystemExit("EVPANDA_API_KEY is not set in this environment")
+if panda.error:
+    log.warning("%s (running inert)", panda.error)
 ```
+
+| Field | Default | Description |
+|---|---|---|
+| `endpoint` | `https://ingest.evpanda.io` | Ingestion API base URL. Set only to reach another environment |
+| `api_key` | `$EVPANDA_API_KEY` | Sent as `X-API-Key`. **Required** |
+| `max_buffer_bytes` | `32 MiB` | Memory ceiling for undelivered captures; oldest are evicted past it |
+| `max_capture_bytes` | `64 KiB` | Per body / per frame cap; an oversize body drops the whole message |
+| `flush_interval` | `5.0` | Maximum seconds between deliveries |
+| `drain_timeout` | `10.0` | How long `close()` waits to drain (minimum `5.0`) |
+| `log_mode` | `"errors"` | `"silent"`, `"errors"`, `"debug"` |
+| `logger` | `logging.getLogger("evpanda")` | Where the SDK's own logs go |
+| `ocpi_allowed_headers` | `()` | *(OCPI only)* Extra headers to capture, on top of the defaults |
+
+## Logging
+
+The SDK reports problems to your logger by default, at a bounded rate: at most
+one summary line per minute, and nothing at all while it's healthy.
+
+```
+WARNING evpanda: captures dropped window=60s captured=12 dropped_invalid=148302 buffered=0 buffer_bytes=0
+```
+
+Set `log_mode` to change that, or `EVPANDA_LOG=silent|errors|debug` to change it
+without touching code:
+
+| Mode | Output |
+|---|---|
+| `"silent"` | Nothing. Counters still work. |
+| `"errors"` | Default. Config problems at startup, plus the per-minute summary. |
+| `"debug"` | Adds per-batch delivery failures and a summary on close. |
+
+## Is it working?
+
+`stats()` is a snapshot of the client's delivery counters, always available and
+safe on an inert or closed client. Each counter maps to one root cause:
+
+```python
+stats = panda.stats()
+# Stats(captured=40120, dropped_invalid=0, dropped_oversize=0, dropped_evicted=9402,
+#       dropped_undeliverable=0, dropped_fault=0, buffered_messages=2, buffer_bytes=528)
+```
+
+| Counter | What a high value means |
+|---|---|
+| `captured` is 0 | The capture path is not wired in |
+| `dropped_invalid` | Identity resolution is failing |
+| `dropped_oversize` | Bodies exceed `max_capture_bytes` |
+| `dropped_evicted` | Upstream can't keep up, or the buffer is undersized |
+| `dropped_undeliverable` | Network, API key, or ingestion fault |
+| `dropped_fault` | A bug in the SDK — please report it |
+
+It is a pull-based snapshot, so it feeds Prometheus, OpenTelemetry or a log
+line without the SDK depending on any of them.
+
+## Shutdown
+
+```python
+server.shutdown()              # stop accepting first…
+if not panda.close():          # …then drain what was captured
+    log.warning("evpanda: shut down with messages still buffered")
+```
+
+`close(timeout=None)` drains within `drain_timeout` (or the seconds you pass)
+and returns whether it managed to. It is idempotent, never raises, and captures
+after it are safe no-ops. Clients are context managers too, so
+`with evpanda.start_ocpi() as panda:` closes on the way out.
+
+A client the host never closes is drained at interpreter exit, and a client
+inherited across `fork()` — gunicorn, uWSGI and other preforking servers —
+restarts its delivery thread in the child.
+
+`flush()` forces an immediate delivery and waits for it. It blocks for as long
+as the transport's retries take, so use it at shutdown or while debugging — not
+on a request path.
+
+## Documentation
+
+- [Architecture and design notes](https://claude.ai/code/artifact/d6759cc2-ff5f-4279-ad63-c2738222f8f8)
+  — how it works, and why. The source lives at [`docs/design.html`](docs/design.html)
+- [evpanda-go](https://github.com/evpanda-labs/evpanda-go) — the reference
+  implementation this SDK tracks
