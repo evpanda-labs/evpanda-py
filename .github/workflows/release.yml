@@ -2,7 +2,7 @@
 # matching GitHub Release.
 #
 # To release:
-#   1. bump __version__ in src/evpanda/__init__.py, and merge it
+#   1. bump __version__ in evpanda/__init__.py, and merge it
 #   2. git tag v0.2.0 && git push origin v0.2.0
 #
 # The tag is the trigger, so the version in the tree and the version in the
@@ -53,7 +53,7 @@ jobs:
           set -euo pipefail
           version="$(python -c "
           import pathlib, re
-          source = pathlib.Path('src/evpanda/__init__.py').read_text()
+          source = pathlib.Path('evpanda/__init__.py').read_text()
           print(re.search(r'__version__ = \"([^\"]+)\"', source).group(1))
           ")"
           if [ "$version" != "${TAG#v}" ]; then

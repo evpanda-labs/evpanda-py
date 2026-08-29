@@ -61,18 +61,18 @@ dev = [
 ]
 
 [tool.hatch.version]
-path = "src/evpanda/__init__.py"
+path = "evpanda/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/evpanda"]
+packages = ["evpanda"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "README.md", "LICENSE", "pyproject.toml"]
+include = ["evpanda", "tests", "README.md", "LICENSE", "pyproject.toml"]
 
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["src", "tests"]
+src = [".", "tests"]
 
 [tool.ruff.format]
 # Ruff formats fenced Python in Markdown too. The README's examples are
@@ -91,7 +91,7 @@ strict = true
 python_version = "3.12"
 # Strict on the shipped package; the tests are annotated but not gated on
 # strict-mode pedantry about their own fixtures.
-files = ["src"]
+files = ["evpanda"]
 
 
 [tool.pytest.ini_options]
