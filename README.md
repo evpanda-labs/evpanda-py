@@ -148,6 +148,19 @@ from evpanda.ocpi import HTTPXTransport
 client = httpx.Client(transport=HTTPXTransport(panda))
 ```
 
+> **If your client sets `verify`, `cert`, `limits`, `proxy` or `http2`**, pass a
+> base transport carrying them. httpx applies those arguments only when it
+> builds its own transport, so supplying `transport=` silently drops them —
+> including the TLS ones:
+>
+> ```python
+> base = httpx.HTTPTransport(verify=ctx, limits=httpx.Limits(max_connections=50))
+> client = httpx.Client(transport=HTTPXTransport(panda, base))
+> ```
+>
+> Client-level settings that are not transport arguments — `timeout`,
+> `follow_redirects`, `headers`, `auth` — are unaffected.
+
 A request with no resolvable identity is served exactly as it would have
 been — it just isn't captured.
 
@@ -158,8 +171,8 @@ the request's own mapping — the WSGI environ or the ASGI scope:
 
 ```python
 from evpanda.ocpi import set_identity
+from starlette.middleware.base import BaseHTTPMiddleware
 
-@app.middleware("http")
 async def authenticate(request, call_next):
     partner = lookup_partner(request.headers.get("authorization"))
     if partner is None:
@@ -168,11 +181,24 @@ async def authenticate(request, call_next):
         platform_id=partner.id, platform_name=partner.name,
     ))
     return await call_next(request)
+
+app.add_middleware(BaseHTTPMiddleware, dispatch=authenticate)
+# FastAPI keeps the decorator form: @app.middleware("http")
 ```
 
-The mapping is read when the response finishes, so **mount order doesn't
-matter**: your auth layer can sit inside or outside the capture middleware and
-either way the identity is seen.
+The scope is read when the response finishes, so **it does not matter where you
+stamp it**. Your auth layer can sit inside or outside the capture middleware,
+and a service that authenticates in the route handler itself can stamp it
+there:
+
+```python
+async def cdrs(request):
+    partner = authenticate(request)          # however your service does it
+    set_identity(request.scope, evpanda.RoamingIdentity(
+        platform_id=partner.id, platform_name=partner.name,
+    ))
+    ...
+```
 
 Outbound, use the context manager — you have already looked the partner up to
 get their token:

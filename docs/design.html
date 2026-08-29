@@ -1932,12 +1932,22 @@ async def handle_charger(websocket, path):
         request and the ordering problem disappears.
       </p>
 
+      <p>
+        That is not a hypothetical difference. Mirage, EVPanda's own OCPI
+        simulator, authenticates inside each route handler rather than in a
+        middleware — it resolves the partner from the
+        <code>Authorization</code> header where the handler needs it anyway.
+        Go's adapter could not see an identity resolved that deep; the Python
+        one reads the scope after the response and does.
+      </p>
+
       <div class="code">
-        <div class="cap">inbound — ASGI, with a Starlette-style auth layer</div>
-<pre><code>from evpanda.ocpi import set_identity
+        <div class="cap">inbound — ASGI, with a Starlette auth layer</div>
+<pre><code>from starlette.middleware.base import BaseHTTPMiddleware
+
+from evpanda.ocpi import set_identity
 from evpanda.ocpi.asgi import ASGIMiddleware
 
-@app.middleware("http")
 async def authenticate(request, call_next):
     partner = lookup_partner(request.headers.get("authorization"))
     if partner is None:
@@ -1946,6 +1956,9 @@ async def authenticate(request, call_next):
         platform_id=partner.id, platform_name=partner.name,
     ))
     return await call_next(request)
+
+app.add_middleware(BaseHTTPMiddleware, dispatch=authenticate)
+<span class="c"># FastAPI keeps the decorator form: @app.middleware("http")</span>
 
 app = ASGIMiddleware(app, panda)</code></pre>
       </div>
@@ -2010,6 +2023,12 @@ app = ASGIMiddleware(app, panda)</code></pre>
 from evpanda.ocpi import HTTPXTransport, use_identity
 
 client = httpx.Client(transport=HTTPXTransport(panda))
+
+<span class="c"># A client that sets verify, cert, limits, proxy or http2 must pass those
+# on a base transport — httpx applies them only when it builds its own,
+# so supplying `transport=` silently drops them:
+#     base = httpx.HTTPTransport(verify=ctx)
+#     client = httpx.Client(transport=HTTPXTransport(panda, base))</span>
 
 <span class="c"># You already looked the partner up to get their Token B —
 # scope the identity to the same block.</span>

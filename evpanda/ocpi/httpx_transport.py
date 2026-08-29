@@ -47,6 +47,18 @@ class HTTPXTransport(httpx.BaseTransport):
         with ocpi.use_identity(partner_identity):
             response = client.post(f"{partner.url}/sessions", json=payload)
 
+    Pass ``base`` when your client configures the transport it would
+    otherwise have built. httpx applies ``verify``, ``cert``, ``limits``,
+    ``proxy`` and ``http2`` only to a transport it constructs itself, so
+    supplying ``transport=`` drops them — silently, including the TLS
+    ones::
+
+        base = httpx.HTTPTransport(verify=ssl_context)
+        client = httpx.Client(transport=HTTPXTransport(panda, base))
+
+    Client-level settings that are not transport arguments — ``timeout``,
+    ``follow_redirects``, ``headers``, ``auth`` — are unaffected.
+
     Identity comes from :func:`~evpanda.ocpi.default_resolver` unless
     ``resolver`` overrides it: the request's ``extensions`` first (under
     the ``evpanda.identity`` key), then the
