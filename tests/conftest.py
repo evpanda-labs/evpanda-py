@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gzip
 import json
 import logging
 import threading
@@ -12,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 import pytest
+import zstandard
 
 import evpanda
 
@@ -68,11 +68,7 @@ class IngestServer:
 
 
 def _decompress(raw: bytes, encoding: str | None) -> bytes:
-    if encoding == "gzip":
-        return gzip.decompress(raw)
     if encoding == "zstd":
-        import zstandard
-
         return bytes(zstandard.decompress(raw))
     return raw
 

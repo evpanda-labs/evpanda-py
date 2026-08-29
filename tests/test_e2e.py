@@ -215,7 +215,7 @@ def test_capture_flush_and_close_race_safely(ingest: IngestServer) -> None:
     assert panda.stats().captured == 800
 
 
-def test_the_body_is_compressed_above_the_floor(ingest: IngestServer) -> None:
+def test_the_body_is_zstd_compressed_above_the_floor(ingest: IngestServer) -> None:
     panda = ocpi_client(ingest, flush_interval=3600.0)
     try:
         for _ in range(50):
@@ -224,7 +224,7 @@ def test_the_body_is_compressed_above_the_floor(ingest: IngestServer) -> None:
     finally:
         panda.close(timeout=5)
 
-    assert ingest.received[0].headers.get("content-encoding") in ("zstd", "gzip")
+    assert ingest.received[0].headers.get("content-encoding") == "zstd"
 
 
 def test_a_small_body_goes_out_uncompressed(ingest: IngestServer) -> None:

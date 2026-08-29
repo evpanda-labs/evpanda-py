@@ -471,7 +471,7 @@
         <div><dt>Distribution</dt><dd>evpanda (PyPI)</dd></div>
         <div><dt>Package</dt><dd>evpanda</dd></div>
         <div><dt>Python</dt><dd>3.12+</dd></div>
-        <div><dt>Runtime deps</dt><dd>none</dd></div>
+        <div><dt>Runtime deps</dt><dd>zstandard</dd></div>
         <div><dt>Threads</dt><dd>1 per client</dd></div>
         <div><dt>Reference SDK</dt><dd>evpanda-go</dd></div>
       </dl>
@@ -831,7 +831,7 @@ def __getattr__(name: str) -&gt; Any:
                                │ batch ≤ 1000 records
                                ▼
         ┌────────────────────────────────────────────┐  _transport.py
-        │  transport       JSON → zstd/gzip → POST   │
+        │  transport       JSON → zstd → POST        │
         └──────────────────────┬─────────────────────┘
                                ▼
               POST /v1/ocpi · POST /v1/ocpp            ingestion API</pre>
@@ -1274,7 +1274,7 @@ while len(self._buffer) &gt; 0:
                │
                ▼
              compress      &lt; 1 KiB ──▶ identity, no CPU spent
-               │           zstd if installed, else gzip
+               │           zstd — the only codec
                ▼
              POST /v1/{protocol}
                │           X-API-Key · Content-Type · Content-Encoding
@@ -1319,14 +1319,18 @@ while len(self._buffer) &gt; 0:
 
       <div class="note">
         <p>
-          <b>The codec is chosen, not configured.</b> The ingestion API accepts
-          gzip and zstd. zstd is better on both CPU and ratio, but it is a
-          compiled dependency; gzip is in the standard library. So the SDK uses
-          zstd when <code>zstandard</code> is importable and gzip otherwise,
-          decided once and cached. The Go SDK has no equivalent choice — its
-          zstd implementation is pure Go, so it always has one — and neither
-          exposes a <code>compression</code> field, because a body the server
-          rejects is not a trade-off worth offering.
+          <b>The codec is fixed, not configured.</b> The ingestion API accepts
+          gzip and uncompressed bodies too, and the SDK sends neither: zstd is
+          the codec, and <code>zstandard</code> is the one runtime dependency
+          the SDK carries for it. That is a deliberate cross-SDK decision
+          rather than a Python one — a batch on the wire looks the same
+          whichever language sent it, and the ingestion API's capacity
+          planning holds across all of them. It costs a compiled wheel, which
+          is the trade: the Go SDK's zstd is pure Go, so it pays nothing,
+          while a Python host on a platform with no <code>zstandard</code>
+          wheel would have to build it. No SDK exposes a
+          <code>compression</code> field, because a body the server rejects is
+          not a trade-off worth offering.
         </p>
         <p>
           Each client builds its own <code>OpenerDirector</code> rather than
@@ -2205,7 +2209,7 @@ HTTPXTransport(panda, resolver=by_path)</code></pre>
             <tr><td>Delivery loop</td><td><code>select</code> on four channels</td><td>One <code>Event</code>, one timeout — also no polling</td></tr>
             <tr><td>Flush serialization</td><td>Structural: one goroutine</td><td>An <code>RLock</code> the worker and callers share</td></tr>
             <tr><td>Deadline enforcement</td><td>Cancel the request context</td><td>The deadline is passed into the transport (§7.2)</td></tr>
-            <tr><td>Codec</td><td>zstd, always (pure-Go dependency)</td><td>zstd when installed, else gzip — no required dependency</td></tr>
+            <tr><td>Codec</td><td>zstd, always (pure-Go dependency)</td><td>zstd, always (a compiled wheel — the one runtime dependency)</td></tr>
             <tr><td>HTTP client</td><td><code>net/http</code>, keep-alive</td><td><code>urllib.request</code>, proxy-aware, a connection per batch</td></tr>
             <tr><td>Inbound adapter</td><td>One: <code>net/http</code> middleware</td><td>Two: WSGI and ASGI</td></tr>
             <tr><td>Outbound adapter</td><td>One: <code>http.RoundTripper</code></td><td>Two: httpx (sync + async) and requests</td></tr>
@@ -2229,11 +2233,10 @@ HTTPXTransport(panda, resolver=by_path)</code></pre>
       </p>
 
       <p>
-        Two rows are worth flagging for anyone running both SDKs against the
-        same ingestion API, because they are observable rather than internal:
-        the Python SDK may send <code>Content-Encoding: gzip</code> where Go
-        always sends <code>zstd</code>, and a Python client opens a connection
-        per batch where Go reuses one. Neither changes a record.
+        One row is worth flagging for anyone running both SDKs against the
+        same ingestion API, because it is observable rather than internal: a
+        Python client opens a connection per batch where Go reuses one. The
+        bodies are identical — both send zstd, by design.
       </p>
     </section>
 

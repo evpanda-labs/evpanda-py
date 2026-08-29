@@ -12,7 +12,7 @@ them in batches to the EVPanda ingestion API.
 - **Bounded.** Memory is capped by a byte budget you set; under pressure the
   SDK drops its own data rather than yours.
 - **Safe by default.** Secrets are stripped before anything is buffered.
-- **Small.** No runtime dependencies, one background thread per client.
+- **Small.** One runtime dependency, one background thread per client.
 
 ## Requirements
 
@@ -24,11 +24,10 @@ Python 3.12 or later.
 pip install evpanda
 ```
 
-The SDK itself is stdlib-only. Three optional extras add a faster codec and the
-two outbound adapters:
+That brings `zstandard`, the codec every EVPanda SDK compresses batches
+with, and nothing else. Two optional extras add the outbound adapters:
 
 ```sh
-pip install 'evpanda[zstd]'      # zstd instead of gzip for batch compression
 pip install 'evpanda[httpx]'     # evpanda.ocpi.HTTPXTransport
 pip install 'evpanda[requests]'  # evpanda.ocpi.RequestsAdapter
 ```

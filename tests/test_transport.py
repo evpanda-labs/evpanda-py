@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import base64
-import gzip
 import json
 import time
 from typing import Any
 
 import pytest
+import zstandard
 
 import evpanda
 from conftest import IngestServer
@@ -145,17 +145,12 @@ def test_small_payloads_are_not_compressed() -> None:
     assert compress(raw) == (raw, "identity")
 
 
-def test_large_payloads_are_compressed() -> None:
+def test_large_payloads_are_zstd_compressed() -> None:
     raw = b'{"messages":[]}' * 500
     body, encoding = compress(raw)
-    assert encoding in ("zstd", "gzip")
+    assert encoding == "zstd"
     assert len(body) < len(raw)
-    if encoding == "gzip":
-        assert gzip.decompress(body) == raw
-    else:
-        import zstandard
-
-        assert zstandard.decompress(body) == raw
+    assert zstandard.decompress(body) == raw
 
 
 def test_backoff_stays_inside_its_bounds() -> None:

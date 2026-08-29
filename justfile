@@ -24,7 +24,7 @@ build:
     python -m build
     twine check --strict dist/*
 
-# Prove the SDK still works with none of its optional extras installed.
+# Prove the SDK still works with none of the adapter extras installed.
 bare:
     #!/usr/bin/env bash
     set -euo pipefail
