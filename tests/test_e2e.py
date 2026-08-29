@@ -1,284 +1,286 @@
-"""End-to-end tests: drive the capture chokepoint against a mock upstream and
-assert the wire shape, batching, redaction, routing, compression, drop-oldest,
-graceful close, and that nothing raises.
-
-The protocol clients (``evpanda.ocpi`` / ``evpanda.ocpp``) are not ported
-yet, so these assemble the same core the clients will: resolve the config,
-build the ring + transport, and drive :class:`evpanda.worker.Worker`.
-"""
+"""End to end: capture on one side, decoded records on the other."""
 
 from __future__ import annotations
 
 import base64
-import re
-from collections.abc import Callable
+import json
+import subprocess
+import sys
+import threading
+import time
+from typing import Any
 
 import pytest
-from conftest import MockUpstream, identity_redactor, make_ocpi, strip_authorization, wait_for
 
-from evpanda import transport
-from evpanda.config import OCPIConfig, OCPPConfig
-from evpanda.identity import ChargerIdentity, RoamingIdentity
-from evpanda.types import (
-    HttpExchange,
-    OCPIDirection,
-    OCPIMessage,
-    OCPPEventType,
-    OCPPMessage,
-)
-from evpanda.worker import Worker
-
-_TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
-
-Build = Callable[..., Worker]
+import evpanda
+from conftest import CHARGER, PARTNER, IngestServer, exchange, ocpi_client, ocpp_client
+from evpanda._worker import BATCH_CAP
 
 
-def test_capture_batch_redact_route(mock: MockUpstream, workers: Build) -> None:
-    worker = workers(
-        OCPIConfig(endpoint=mock.url, api_key="test-key", flush_interval=0.1),
-    )
-    for i in range(3):
-        worker.capture_ocpi(make_ocpi(i), strip_authorization)
-
-    wait_for(lambda: len(mock.ocpi_records()) == 3, 3.0)
-
-    recs = sorted(mock.ocpi_records(), key=lambda r: r["url"])
-    assert len(recs) == 3
-    assert mock.ocpi_posts()[0].headers.get("X-API-Key") == "test-key"
-
-    for i, rec in enumerate(recs):
-        assert _TS_RE.match(rec["captured_at"])
-        assert rec["url"] == f"/ocpi/2.2/cdrs/{i}"
-        assert rec["platform_id"] == "acme"
-        assert rec["direction"] == "IN"
-        assert rec["http_method"] == "POST"
-        assert rec["response_status_code"] == 200
-        # The redactor handed to the chokepoint was applied.
-        req_headers = rec["request_headers"]
-        assert "Authorization" not in req_headers
-        assert "authorization" not in req_headers
-        assert req_headers["X-Trace"] == str(i)
-        assert base64.standard_b64decode(rec["request_body"]) == f"body-{i}".encode()
-
-
-def test_gzip_and_chunking(mock: MockUpstream, workers: Build) -> None:
-    worker = workers(
-        OCPIConfig(
-            endpoint=mock.url,
-            api_key="k",
-            compression="gzip",
-            flush_interval=0.1,
-            buffer_capacity=100_000,
-        )
-    )
-    n = 2500
-    for i in range(n):
-        worker.capture_ocpi(make_ocpi(i), identity_redactor)
-
-    wait_for(lambda: len(mock.ocpi_records()) == n, 8.0)
-
-    posts = mock.ocpi_posts()
-    assert len(posts) >= 3
-    for p in posts:
-        assert len(p.records) <= 1000
-        assert p.headers.get("Content-Encoding") == "gzip"
-
-    for i, rec in enumerate(mock.ocpi_records()):
-        assert rec["url"] == f"/ocpi/2.2/cdrs/{i}"
-
-
-def test_default_zstd_path(mock: MockUpstream, workers: Build) -> None:
-    pytest.importorskip("zstandard")
-    worker = workers(
-        OCPIConfig(endpoint=mock.url, api_key="k", flush_interval=0.1, buffer_capacity=100_000)
-    )
-    # >= 1024 bytes of payload so compression actually kicks in.
-    n = 200
-    for i in range(n):
-        worker.capture_ocpi(make_ocpi(i), identity_redactor)
-
-    wait_for(lambda: len(mock.ocpi_records()) == n, 5.0)
-    assert any(p.headers.get("Content-Encoding") == "zstd" for p in mock.ocpi_posts())
-
-
-def test_gzip_fallback_when_zstd_is_absent(
-    mock: MockUpstream, workers: Build, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # zstd is an optional extra; without it the transport degrades to gzip.
-    monkeypatch.setattr(transport, "_load_zstd", lambda: None)
-    worker = workers(
-        OCPIConfig(endpoint=mock.url, api_key="k", flush_interval=0.1, buffer_capacity=100_000)
-    )
-    n = 200
-    for i in range(n):
-        worker.capture_ocpi(make_ocpi(i), identity_redactor)
-
-    wait_for(lambda: len(mock.ocpi_records()) == n, 5.0)
-    assert all(p.headers.get("Content-Encoding") == "gzip" for p in mock.ocpi_posts())
-
-
-def test_small_payload_sent_identity(mock: MockUpstream, workers: Build) -> None:
-    worker = workers(OCPIConfig(endpoint=mock.url, api_key="k", flush_interval=0.1))
-    worker.capture_ocpi(
-        OCPIMessage(
-            direction=OCPIDirection.OUT,
-            identity=RoamingIdentity(platform_id="acme", platform_name="Acme"),
-            data=HttpExchange(method="GET", url="/x"),
-        ),
-        identity_redactor,
-    )
-    wait_for(lambda: len(mock.ocpi_records()) == 1, 3.0)
-    assert mock.ocpi_posts()[0].headers.get("Content-Encoding") is None
-
-
-def test_drop_oldest(mock: MockUpstream, workers: Build) -> None:
-    worker = workers(
-        OCPIConfig(
-            endpoint=mock.url,
-            api_key="k",
-            buffer_capacity=5,
-            flush_interval=60.0,  # no auto flush during the test
-        )
-    )
-    for i in range(12):  # 0..11
-        worker.capture_ocpi(make_ocpi(i), identity_redactor)
-    worker.flush_once()  # force one drain
-
-    wait_for(lambda: len(mock.ocpi_records()) == 5, 3.0)
-    urls = sorted(r["url"] for r in mock.ocpi_records())
-    assert urls == sorted(f"/ocpi/2.2/cdrs/{i}" for i in (7, 8, 9, 10, 11))
-
-
-def test_flush_on_close(mock: MockUpstream, workers: Build) -> None:
-    worker = workers(
-        OCPIConfig(endpoint=mock.url, api_key="k", flush_interval=60.0)  # never auto-flushes
-    )
-    for i in range(4):
-        worker.capture_ocpi(make_ocpi(i), identity_redactor)
-    assert len(mock.ocpi_records()) == 0
-
-    worker.close()  # graceful drain
-    assert len(mock.ocpi_records()) == 4
-
-    worker.close()  # idempotent
-
-
-def test_never_raises_when_upstream_fails(mock: MockUpstream, workers: Build) -> None:
-    mock.set_status(400)  # permanent reject → dropped
-    worker = workers(OCPIConfig(endpoint=mock.url, api_key="k", flush_interval=60.0))
-    for i in range(3):
-        worker.capture_ocpi(make_ocpi(i), identity_redactor)
-
-    worker.flush_once()  # returns even though the upstream 400s
-
-    assert len(mock.ocpi_posts()) > 0
-    worker.capture_ocpi(make_ocpi(100), identity_redactor)
-    worker.flush_once()
-
-
-def test_invalid_identity_is_dropped(mock: MockUpstream, workers: Build) -> None:
-    worker = workers(OCPIConfig(endpoint=mock.url, api_key="k", flush_interval=60.0))
-    bad = [
-        RoamingIdentity(platform_id="", platform_name="Acme"),  # no platform id
-        RoamingIdentity(platform_id="acme", platform_name="   "),  # blank name
-        RoamingIdentity(platform_id="acme", platform_name="Acme", tenant_id="t"),  # half tenant
-    ]
-    for identity in bad:
-        worker.capture_ocpi(
-            OCPIMessage(
-                direction=OCPIDirection.IN,
-                identity=identity,
-                data=HttpExchange(method="GET", url="/x"),
+def test_an_inbound_ocpi_exchange_arrives_intact(ingest: IngestServer) -> None:
+    panda = ocpi_client(ingest, flush_interval=3600.0)
+    try:
+        panda.capture_inbound_message(
+            evpanda.RoamingIdentity(
+                platform_id="acme",
+                platform_name="Acme Mobility",
+                tenant_id="t-1",
+                tenant_name="Tenant One",
             ),
-            identity_redactor,
+            exchange(),
         )
-    worker.flush_once()
-    assert mock.ocpi_records() == []
+        panda.flush()
+    finally:
+        panda.close(timeout=5)
+
+    record = ingest.wait_for_messages(1)[0]
+    assert ingest.received[0].path == "/v1/ocpi"
+    assert record["direction"] == "IN"
+    assert record["platform_id"] == "acme"
+    assert record["tenant_name"] == "Tenant One"
+    assert record["http_method"] == "POST"
+    assert record["url"] == "/ocpi/2.2/cdrs"
+    assert record["response_status_code"] == 201
+    assert base64.standard_b64decode(record["request_body"]) == b'{"id":"cdr-1"}'
+    assert record["captured_at"].endswith("Z")
 
 
-def test_oversize_body_drops_the_message(mock: MockUpstream, workers: Build) -> None:
-    worker = workers(
-        OCPIConfig(endpoint=mock.url, api_key="k", max_capture_bytes=16, flush_interval=60.0)
+def test_the_method_stamps_the_direction(ingest: IngestServer) -> None:
+    panda = ocpi_client(ingest, flush_interval=3600.0)
+    try:
+        panda.capture_inbound_message(PARTNER, exchange())
+        panda.capture_outbound_message(PARTNER, exchange())
+        panda.flush()
+    finally:
+        panda.close(timeout=5)
+
+    assert [m["direction"] for m in ingest.wait_for_messages(2)] == ["IN", "OUT"]
+
+
+def test_secrets_never_reach_the_wire(ingest: IngestServer) -> None:
+    panda = ocpi_client(ingest, flush_interval=3600.0)
+    try:
+        panda.capture_outbound_message(
+            PARTNER,
+            exchange(
+                url="/ocpi/2.2/credentials",
+                request_headers={"Authorization": "Token super-secret", "accept": "*/*"},
+                request_body=json.dumps({"token": "another-secret"}).encode(),
+            ),
+        )
+        panda.flush()
+    finally:
+        panda.close(timeout=5)
+
+    record = ingest.wait_for_messages(1)[0]
+    assert record["request_headers"] == {"accept": "*/*"}
+    body = json.loads(base64.standard_b64decode(record["request_body"]))
+    assert body == {"token": "[redacted]"}
+
+
+def test_an_ocpp_session_arrives_as_three_events(ingest: IngestServer) -> None:
+    panda = ocpp_client(ingest, flush_interval=3600.0)
+    try:
+        session = panda.connection(CHARGER)
+        session.message('[2,"1","Heartbeat",{}]', evpanda.OCPPDirection.FROM_CP)
+        session.disconnect()
+        panda.flush()
+    finally:
+        panda.close(timeout=5)
+
+    messages = ingest.wait_for_messages(3)
+    assert [m["event_type"] for m in messages] == [1, 2, 0]
+    assert messages[1]["direction"] == "FROM_CP"
+    assert base64.standard_b64decode(messages[1]["raw_frame"]) == b'[2,"1","Heartbeat",{}]'
+    assert messages[0]["raw_frame"] is None
+    assert messages[0]["charger_id"] == "CP-001"
+
+
+def test_a_full_batch_flushes_without_waiting(ingest: IngestServer) -> None:
+    panda = ocpp_client(ingest, flush_interval=3600.0)
+    try:
+        session = panda.connection(CHARGER)
+        for _ in range(BATCH_CAP):
+            session.message(b'[2,"1","Heartbeat",{}]', evpanda.OCPPDirection.FROM_CP)
+        # No flush() call: the size trigger alone must deliver it.
+        assert len(ingest.wait_for_messages(BATCH_CAP)) >= BATCH_CAP
+    finally:
+        panda.close(timeout=5)
+
+
+def test_a_large_backlog_is_chunked(ingest: IngestServer) -> None:
+    panda = ocpp_client(ingest, flush_interval=3600.0)
+    try:
+        session = panda.connection(CHARGER)
+        for _ in range(BATCH_CAP + 500):
+            session.message(b'[2,"1","Heartbeat",{}]', evpanda.OCPPDirection.FROM_CP)
+        panda.flush()
+    finally:
+        panda.close(timeout=5)
+
+    ingest.wait_for_messages(BATCH_CAP + 501)
+    assert all(len(request.messages) <= BATCH_CAP for request in ingest.received)
+
+
+def test_the_interval_flushes_on_its_own(ingest: IngestServer) -> None:
+    panda = ocpi_client(ingest, flush_interval=0.05)
+    try:
+        panda.capture_inbound_message(PARTNER, exchange())
+        assert len(ingest.wait_for_messages(1)) == 1
+    finally:
+        panda.close(timeout=5)
+
+
+def test_close_delivers_what_was_buffered(ingest: IngestServer) -> None:
+    panda = ocpi_client(ingest, flush_interval=3600.0)
+    panda.capture_inbound_message(PARTNER, exchange())
+
+    assert panda.close(timeout=5) is True
+
+    assert len(ingest.messages) == 1
+
+
+def test_the_buffer_evicts_rather_than_growing(ingest: IngestServer) -> None:
+    panda = ocpi_client(
+        ingest, flush_interval=3600.0, max_buffer_bytes=64 << 10, max_capture_bytes=1024
     )
-    ident = RoamingIdentity(platform_id="acme", platform_name="Acme")
-    worker.capture_ocpi(
-        OCPIMessage(
-            direction=OCPIDirection.IN,
-            identity=ident,
-            data=HttpExchange(method="POST", url="/big", request_body=b"x" * 17),
-        ),
-        identity_redactor,
+    try:
+        for _ in range(500):
+            panda.capture_inbound_message(PARTNER, exchange(request_body=b"x" * 512))
+
+        stats = panda.stats()
+        assert stats.buffer_bytes <= 64 << 10
+        assert stats.dropped_evicted > 0
+    finally:
+        panda.close(timeout=5)
+
+
+def test_an_oversize_body_drops_only_that_message(ingest: IngestServer) -> None:
+    panda = ocpi_client(ingest, flush_interval=3600.0, max_capture_bytes=64)
+    try:
+        panda.capture_inbound_message(PARTNER, exchange(request_body=b"x" * 65))
+        panda.capture_inbound_message(PARTNER, exchange(request_body=b"x" * 8))
+        panda.flush()
+    finally:
+        panda.close(timeout=5)
+
+    assert len(ingest.wait_for_messages(1)) == 1
+    assert panda.stats().dropped_oversize == 1
+
+
+def test_a_dead_upstream_never_reaches_the_host(fast_backoff: None) -> None:
+    panda = evpanda.start_ocpi(
+        evpanda.OCPIConfig(
+            endpoint="http://127.0.0.1:1", api_key="k", flush_interval=0.02, drain_timeout=5.0
+        )
     )
-    worker.capture_ocpi(
-        OCPIMessage(
-            direction=OCPIDirection.IN,
-            identity=ident,
-            data=HttpExchange(method="POST", url="/big-response", response_body=b"y" * 17),
-        ),
-        identity_redactor,
+    try:
+        for _ in range(50):
+            panda.capture_inbound_message(PARTNER, exchange())
+        panda.flush()
+    finally:
+        assert panda.close(timeout=5) is True
+
+    assert panda.stats().dropped_undeliverable > 0
+
+
+def test_capture_flush_and_close_race_safely(ingest: IngestServer) -> None:
+    panda = ocpi_client(ingest, flush_interval=0.01)
+    errors: list[BaseException] = []
+
+    def capture() -> None:
+        try:
+            for _ in range(200):
+                panda.capture_inbound_message(PARTNER, exchange())
+        except BaseException as exc:  # noqa: BLE001 - the point of the test
+            errors.append(exc)
+
+    def flush() -> None:
+        try:
+            for _ in range(20):
+                panda.flush()
+        except BaseException as exc:  # noqa: BLE001 - the point of the test
+            errors.append(exc)
+
+    threads = [threading.Thread(target=capture) for _ in range(4)]
+    threads.append(threading.Thread(target=flush))
+    for thread in threads:
+        thread.start()
+    time.sleep(0.02)
+    panda.close(timeout=5)
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert errors == []
+    assert panda.stats().captured == 800
+
+
+def test_the_body_is_compressed_above_the_floor(ingest: IngestServer) -> None:
+    panda = ocpi_client(ingest, flush_interval=3600.0)
+    try:
+        for _ in range(50):
+            panda.capture_inbound_message(PARTNER, exchange())
+        panda.flush()
+    finally:
+        panda.close(timeout=5)
+
+    assert ingest.received[0].headers.get("content-encoding") in ("zstd", "gzip")
+
+
+def test_a_small_body_goes_out_uncompressed(ingest: IngestServer) -> None:
+    panda = ocpi_client(ingest, flush_interval=3600.0)
+    try:
+        panda.capture_inbound_message(PARTNER, exchange(request_body=None, response_body=None))
+        panda.flush()
+    finally:
+        panda.close(timeout=5)
+
+    assert "content-encoding" not in ingest.received[0].headers
+
+
+@pytest.mark.parametrize("log_mode", ["silent", "errors", "debug"])
+def test_every_log_mode_still_delivers(ingest: IngestServer, log_mode: str) -> None:
+    panda = ocpi_client(ingest, flush_interval=3600.0, log_mode=log_mode)
+    try:
+        panda.capture_inbound_message(PARTNER, exchange())
+        panda.flush()
+    finally:
+        panda.close(timeout=5)
+
+    assert len(ingest.wait_for_messages(1)) == 1
+
+
+def test_an_unclosed_client_still_drains_at_exit(ingest: IngestServer) -> None:
+    """A daemon thread would otherwise take the last captures down with it."""
+    script = f"""
+import evpanda
+
+panda = evpanda.start_ocpi(evpanda.OCPIConfig(
+    endpoint={ingest.url!r}, api_key="k", flush_interval=3600.0,
+))
+panda.capture_inbound_message(
+    evpanda.RoamingIdentity(platform_id="acme", platform_name="Acme Mobility"),
+    evpanda.HTTPExchange(method="GET", url="/ocpi/2.2/versions", status_code=200),
+)
+# and then the process simply ends, without close()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, timeout=60, check=False
     )
-    worker.capture_ocpi(
-        OCPIMessage(
-            direction=OCPIDirection.IN,
-            identity=ident,
-            data=HttpExchange(method="POST", url="/ok", request_body=b"z" * 16),
-        ),
-        identity_redactor,
+
+    assert result.returncode == 0, result.stderr.decode()
+    assert [m["url"] for m in ingest.wait_for_messages(1)] == ["/ocpi/2.2/versions"]
+
+
+def test_stats_survive_the_client(ingest: IngestServer) -> None:
+    panda = ocpi_client(ingest, flush_interval=3600.0)
+    panda.capture_inbound_message(PARTNER, exchange())
+    panda.capture_inbound_message(
+        evpanda.RoamingIdentity(platform_id="", platform_name=""), exchange()
     )
-    worker.flush_once()
+    panda.close(timeout=5)
 
-    wait_for(lambda: len(mock.ocpi_records()) == 1, 3.0)
-    assert mock.ocpi_records()[0]["url"] == "/ok"
-
-
-def test_nullable_fields_serialized_as_null(mock: MockUpstream, workers: Build) -> None:
-    worker = workers(OCPIConfig(endpoint=mock.url, api_key="k", flush_interval=0.1))
-    # No tenant, no bodies, no status code, no headers.
-    worker.capture_ocpi(
-        OCPIMessage(
-            direction=OCPIDirection.OUT,
-            identity=RoamingIdentity(platform_id="acme", platform_name="Acme"),
-            data=HttpExchange(method="GET", url="/x"),
-        ),
-        identity_redactor,
-    )
-    wait_for(lambda: len(mock.ocpi_records()) == 1, 3.0)
-
-    rec = mock.ocpi_records()[0]
-    # Keys are PRESENT and explicitly null when absent.
-    for key in (
-        "tenant_id",
-        "tenant_name",
-        "response_status_code",
-        "request_headers",
-        "request_body",
-        "response_headers",
-        "response_body",
-    ):
-        assert key in rec, f"{key} must be present"
-        assert rec[key] is None, f"{key} must be JSON null"
-    assert rec["platform_id"] == "acme"
-    assert rec["direction"] == "OUT"
-    assert rec["http_method"] == "GET"
-
-
-def test_ocpp_event_type_never_null(mock: MockUpstream, workers: Build) -> None:
-    worker = workers(OCPPConfig(endpoint=mock.url, api_key="k", flush_interval=0.1))
-    # DISCONNECT == 0 must still serialize as 0, never null.
-    worker.capture_ocpp(
-        OCPPMessage(
-            event_type=OCPPEventType.DISCONNECT,
-            identity=ChargerIdentity(charger_id="CP-001"),
-            connection_id="conn-1",
-        ),
-        identity_redactor,
-    )
-    wait_for(lambda: len(mock.records("/v1/ocpp")) == 1, 3.0)
-
-    rec = mock.records("/v1/ocpp")[0]
-    assert rec["event_type"] == 0
-    assert rec["event_type"] is not None
-    assert rec["direction"] is None  # absent ⇒ null
-    assert rec["raw_frame"] is None
-    assert rec["charger_id"] == "CP-001"
-    assert rec["connection_id"] == "conn-1"
+    final: Any = panda.stats()
+    assert final.captured == 1
+    assert final.dropped_invalid == 1
+    assert final.buffered_messages == 0

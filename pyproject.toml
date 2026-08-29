@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "evpanda"
 dynamic = ["version"]
-description = "EVPanda Python SDK"
+description = "Passive OCPI / OCPP traffic capture for Python"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
@@ -34,6 +34,8 @@ classifiers = [
   "Topic :: System :: Monitoring",
   "Typing :: Typed",
 ]
+# No runtime dependencies: the SDK is stdlib-only. The extras below are
+# only needed for the optional codec and the two outbound adapters.
 dependencies = []
 
 [project.urls]
@@ -42,9 +44,24 @@ Repository = "https://github.com/evpanda-labs/evpanda-py"
 Issues = "https://github.com/evpanda-labs/evpanda-py/issues"
 
 [project.optional-dependencies]
-# zstd is optional: absent, the transport falls back to gzip.
+# Batches are gzipped without it; zstd compresses better and faster.
 zstd = ["zstandard>=0.22"]
-dev = ["ruff", "mypy", "pytest", "zstandard>=0.22"]
+# Only for evpanda.ocpi.HTTPXTransport / RequestsAdapter.
+httpx = ["httpx>=0.27"]
+requests = ["requests>=2.31"]
+dev = [
+  "ruff>=0.9",
+  "mypy>=1.13",
+  "pytest>=8",
+  "zstandard>=0.22",
+  "httpx>=0.27",
+  "requests>=2.31",
+  "types-requests",
+  # Only for tests/test_ocpi_frameworks.py — the adapters themselves stay
+  # framework-agnostic.
+  "flask>=3",
+  "starlette>=0.37",
+]
 
 [tool.hatch.version]
 path = "src/evpanda/__init__.py"
@@ -52,16 +69,32 @@ path = "src/evpanda/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/evpanda"]
 
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md", "LICENSE", "pyproject.toml"]
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.format]
+# Ruff formats fenced Python in Markdown too. The README's examples are
+# aligned for reading, not for the formatter, so it stays out of them.
+exclude = ["*.md"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "SIM"]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF", "C4", "PIE", "BLE"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests reach into the internals they are testing.
+"tests/*" = ["SLF001"]
 
 [tool.mypy]
 strict = true
 python_version = "3.12"
+# Strict on the shipped package; the tests are annotated but not gated on
+# strict-mode pedantry about their own fixtures.
+files = ["src"]
 
 [[tool.mypy.overrides]]
 module = ["zstandard"]
@@ -69,3 +102,5 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error"]
