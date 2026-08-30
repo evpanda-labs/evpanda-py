@@ -306,7 +306,7 @@ The SDK reports problems to your logger by default, at a bounded rate: at most
 one summary line per minute, and nothing at all while it's healthy.
 
 ```
-WARNING evpanda: captures dropped window=60s captured=12 dropped_invalid=148302 buffered=0 buffer_bytes=0
+WARNING evpanda: captures dropped window=60s captured=12 invalid_identity=148302 buffered=0 buffer_bytes=0
 ```
 
 Set `log_mode` to change that, or `EVPANDA_LOG=silent|errors|debug` to change it
@@ -325,8 +325,8 @@ safe on an inert or closed client. Each counter maps to one root cause:
 
 ```python
 stats = panda.stats()
-# Stats(captured=40120, dropped_invalid=0, dropped_oversize=0, dropped_evicted=9402,
-#       dropped_undeliverable=0, dropped_fault=0, buffered_messages=2, buffer_bytes=528)
+# Stats(captured=40120, invalid_identity=0, oversize=0, evicted=9402,
+#       undeliverable=0, fault=0, buffered_messages=2, buffer_bytes=528)
 ```
 
 | Counter | What a high value means |
@@ -365,6 +365,8 @@ on a request path.
 ## Documentation
 
 - [Architecture and design notes](https://claude.ai/code/artifact/d6759cc2-ff5f-4279-ad63-c2738222f8f8)
-  — how it works, and why. The source lives at [`docs/design.html`](docs/design.html)
+  — how it works, and why. The source lives in the Obsidian vault at
+  `engineering/SDKs/design-docs/`, not in this repo: it is knowledge
+  about the code rather than part of what ships
 - [evpanda-go](https://github.com/evpanda-labs/evpanda-go) — the reference
   implementation this SDK tracks

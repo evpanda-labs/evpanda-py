@@ -232,7 +232,7 @@ def test_stats_deltas_and_log_line() -> None:
     assert delta.dropped_evicted == 2
     assert delta.captured == 0
     assert delta.buffered_messages == 7  # gauges carry across, not differenced
-    assert delta.log_line() == "dropped_evicted=2 buffered=7 buffer_bytes=99"
+    assert delta.log_line() == "evicted=2 buffered=7 buffer_bytes=99"
 
 
 def test_timestamps_are_rfc3339_millis() -> None:

@@ -104,24 +104,26 @@ class Stats:
             buffer_bytes=self.buffer_bytes,
         )
 
+    #: The key each counter is logged under. Deliberately not the field
+    #: names: the health line is operator-facing, and an operator grepping a
+    #: polyglot fleet should see one vocabulary, not three. All three SDKs
+    #: emit exactly these keys.
+    _LOG_KEYS = (
+        ("captured", "captured"),
+        ("invalid_identity", "dropped_invalid"),
+        ("oversize", "dropped_oversize"),
+        ("evicted", "dropped_evicted"),
+        ("undeliverable", "dropped_undeliverable"),
+        ("fault", "dropped_fault"),
+    )
+
     def log_line(self) -> str:
         """Render the snapshot as ``key=value`` pairs, omitting zero counters.
 
         Keeping the line to what actually happened is what makes it
         readable at a glance in a production log.
         """
-        pairs = [
-            (name, getattr(self, name))
-            for name in (
-                "captured",
-                "dropped_invalid",
-                "dropped_oversize",
-                "dropped_evicted",
-                "dropped_undeliverable",
-                "dropped_fault",
-            )
-            if getattr(self, name)
-        ]
+        pairs = [(key, getattr(self, name)) for key, name in self._LOG_KEYS if getattr(self, name)]
         pairs += [("buffered", self.buffered_messages), ("buffer_bytes", self.buffer_bytes)]
         return " ".join(f"{k}={v}" for k, v in pairs)
 
