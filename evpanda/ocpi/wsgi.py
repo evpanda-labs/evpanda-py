@@ -1,9 +1,9 @@
 """Adapter — OCPI inbound (partner → host), WSGI.
 
 Wraps any WSGI application: Flask, Django, Bottle, Pyramid, Falcon, or a
-bare callable. It resolves identity, records the request body as your
-application reads it, tees the response as the server writes it, and ships
-one message when the response is done.
+bare callable. It resolves identity, records the request body, tees the
+response as the server writes it, and ships one message when the response
+is done.
 
 A request with no resolvable identity is served exactly as it would have
 been — it just is not captured. The middleware never alters a response,
@@ -12,6 +12,7 @@ never blocks a request, and never raises on the SDK's account.
 
 from __future__ import annotations
 
+import io
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
@@ -55,10 +56,9 @@ class WSGIMiddleware:
     this middleware can stamp the environ and still be seen — mount order
     does not matter.
 
-    The request body is recorded as your application reads it, so an
-    application that ignores the body records none. Bodies are capped at
-    ``max_capture_bytes``; an oversize body on either side drops the whole
-    message rather than storing a truncated one.
+    Bodies are capped at ``max_capture_bytes``; an oversize body on either
+    side drops the whole message rather than storing a truncated one, and
+    is never read into memory in the first place.
     """
 
     __slots__ = ("_app", "_client", "_resolver")
@@ -90,9 +90,7 @@ class WSGIMiddleware:
             response_body=CappedBody(max_bytes),
         )
 
-        stream = environ.get("wsgi.input")
-        if stream is not None:
-            environ["wsgi.input"] = _TeeInput(stream, exchange.request_body)
+        _take_request_body(environ, exchange.request_body, max_bytes)
 
         def capturing_start_response(
             status: str, headers: list[tuple[str, str]], exc_info: Any = None
@@ -136,83 +134,6 @@ def _record_response_head(exchange: Exchange, status: str, headers: list[tuple[s
     exchange.response_headers = header_map(headers)
 
 
-class _TeeInput:
-    """Records what the application reads from ``wsgi.input``.
-
-    Every read path a WSGI application might take is implemented here, not
-    only ``read``: Werkzeug — and so Flask — reads through ``readinto``,
-    Django through ``read`` and ``readline``, and others iterate the stream.
-    A wrapper that delegates one of those straight to the underlying stream
-    records an empty body while the host works perfectly, which is the worst
-    shape of bug this SDK can have. Anything that is not a read is delegated
-    untouched.
-    """
-
-    __slots__ = ("_body", "_stream")
-
-    def __init__(self, stream: Any, body: CappedBody) -> None:
-        self._stream = stream
-        self._body = body
-
-    def read(self, size: int = -1) -> bytes:
-        chunk: bytes = self._stream.read(size)
-        self._body.push(chunk)
-        return chunk
-
-    def read1(self, size: int = -1) -> bytes:
-        read1 = getattr(self._stream, "read1", None)
-        if read1 is None:
-            return self.read(size)
-        chunk: bytes = read1(size)
-        self._body.push(chunk)
-        return chunk
-
-    def readinto(self, buffer: Any) -> int:
-        readinto = getattr(self._stream, "readinto", None)
-        if readinto is None:
-            chunk = self.read(len(buffer))  # teed by read
-            buffer[: len(chunk)] = chunk
-            return len(chunk)
-        count: int = readinto(buffer)
-        if count:
-            self._body.push(bytes(memoryview(buffer)[:count]))
-        return count
-
-    def readinto1(self, buffer: Any) -> int:
-        readinto1 = getattr(self._stream, "readinto1", None)
-        if readinto1 is None:
-            return self.readinto(buffer)
-        count: int = readinto1(buffer)
-        if count:
-            self._body.push(bytes(memoryview(buffer)[:count]))
-        return count
-
-    def readline(self, size: int = -1) -> bytes:
-        chunk: bytes = self._stream.readline(size)
-        self._body.push(chunk)
-        return chunk
-
-    def readlines(self, hint: int = -1) -> list[bytes]:
-        lines: list[bytes] = self._stream.readlines(hint)
-        for line in lines:
-            self._body.push(line)
-        return lines
-
-    def readall(self) -> bytes:
-        return self.read()
-
-    def __iter__(self) -> Iterator[bytes]:
-        for line in self._stream:
-            self._body.push(line)
-            yield line
-
-    def readable(self) -> bool:
-        return True
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._stream, name)
-
-
 class _CapturingIterable:
     """Tees the response body, then ships exactly once.
 
@@ -254,6 +175,43 @@ class _CapturingIterable:
             return
         self._finished = True
         self._finish()
+
+
+def _take_request_body(environ: WSGIEnvironment, body: CappedBody, max_bytes: int) -> None:
+    """Record the request body, and hand the application a copy of it.
+
+    The Go SDK tees ``r.Body`` and records the body as the handler reads it,
+    because Go's ``io.ReadCloser`` has exactly one read method. Python's file
+    protocol has six — ``read``, ``read1``, ``readinto``, ``readline``,
+    ``readlines`` and iteration — a framework may use any of them, and a
+    wrapper that forwards one of them untouched records an empty body while
+    the host works perfectly. Werkzeug uses ``readinto``; Django uses
+    ``read``. Reading the body here and giving the application a
+    :class:`io.BytesIO` of it removes that whole class of bug: BytesIO is
+    the standard library's own implementation of the protocol, so there is
+    nothing left to get wrong.
+
+    The read is bounded before it happens. A body larger than the cap is
+    never pulled into memory — it is marked oversize, which drops the
+    exchange exactly as an oversize body does everywhere else — and a
+    request with no ``Content-Length`` (a chunked upload, which no OCPI
+    client sends) is passed through untouched and captured without a body.
+    """
+    stream = environ.get("wsgi.input")
+    if stream is None:
+        return
+    try:
+        length = int(environ.get("CONTENT_LENGTH") or 0)
+    except ValueError:
+        return
+    if length <= 0:
+        return
+    if length > max_bytes:
+        body.overflow()
+        return
+    data = stream.read(length)
+    body.push(data)
+    environ["wsgi.input"] = io.BytesIO(data)
 
 
 def request_url(environ: WSGIEnvironment) -> str:

@@ -274,6 +274,13 @@ class CappedBody:
             self._chunks.append(bytes(chunk))
             self._size += len(chunk)
 
+    def overflow(self) -> None:
+        """Mark the body too large to keep, without having to read it."""
+        with self._lock:
+            self._overflowed = True
+            self._chunks = []
+            self._size = 0
+
     def result(self) -> tuple[bytes | None, bool]:
         """The accumulated bytes and whether the cap was exceeded."""
         with self._lock:

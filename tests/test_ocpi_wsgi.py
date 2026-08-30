@@ -182,7 +182,11 @@ def test_an_oversize_body_drops_the_exchange() -> None:
     assert client.inbound == []
 
 
-def test_a_body_the_app_never_reads_is_not_recorded() -> None:
+def test_a_body_the_app_never_reads_is_still_recorded() -> None:
+    """The body is taken up front, so a handler that rejects a request
+    without parsing it still records what the partner sent — which is the
+    exchange you most want to see.
+    """
     client = FakeCapturer()
     environ = environ_for(b'{"id":"cdr-1"}')
     set_identity(environ, PARTNER)
@@ -194,8 +198,41 @@ def test_a_body_the_app_never_reads_is_not_recorded() -> None:
     run(WSGIMiddleware(ignores_body, client), environ)
 
     _, data = client.inbound[0]
-    assert data.request_body is None
+    assert data.request_body == b'{"id":"cdr-1"}'
     assert data.status_code == 204
+
+
+def test_an_oversize_body_is_never_read_into_memory() -> None:
+    """The cap is enforced from Content-Length, before anything is read."""
+    client = FakeCapturer(max_capture_bytes=16)
+    environ = environ_for(b"x" * 64)
+    set_identity(environ, PARTNER)
+    original = environ["wsgi.input"]
+
+    def reads_body(environ: dict[str, Any], start_response: Any) -> Iterable[bytes]:
+        assert environ["wsgi.input"] is original  # untouched: we never read it
+        environ["wsgi.input"].read()
+        start_response("413 Payload Too Large", [])
+        return []
+
+    status, _ = run(WSGIMiddleware(reads_body, client), environ)
+
+    assert status == "413 Payload Too Large"
+    assert client.inbound == []  # oversize drops the exchange, as everywhere
+
+
+def test_a_chunked_request_is_captured_without_its_body() -> None:
+    """No Content-Length means no bounded read, so the stream is left alone."""
+    client = FakeCapturer()
+    environ = environ_for(b'{"id":"cdr-1"}')
+    del environ["CONTENT_LENGTH"]
+    set_identity(environ, PARTNER)
+
+    run(WSGIMiddleware(echo_app(), client), environ)
+
+    _, data = client.inbound[0]
+    assert data.request_body is None
+    assert data.status_code == 201
 
 
 def test_an_app_that_raises_is_still_captured() -> None:

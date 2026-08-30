@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import sys
 from typing import Any
 
 import pytest
@@ -37,6 +39,29 @@ def mock_transport(
         return httpx.Response(status, headers={"content-type": "application/json"}, content=body)
 
     return httpx.MockTransport(handler)
+
+
+def test_a_missing_extra_names_the_install_command() -> None:
+    """The import error has to say what to install, not just what is absent."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def without_httpx(name: str, *args: Any) -> Any:
+        if name == "httpx":
+            raise ImportError("No module named 'httpx'")
+        return real_import(name, *args)
+
+    for module in ("evpanda.ocpi.httpx_transport", "evpanda.ocpi.requests_adapter"):
+        sys.modules.pop(module, None)
+    builtins.__import__ = without_httpx
+    try:
+        with pytest.raises(ImportError, match=r"pip install 'evpanda\[httpx\]'"):
+            importlib.import_module("evpanda.ocpi.httpx_transport")
+    finally:
+        builtins.__import__ = real_import
+        sys.modules.pop("evpanda.ocpi.httpx_transport", None)
+        importlib.import_module("evpanda.ocpi.httpx_transport")
 
 
 # ── httpx, synchronous ───────────────────────────────────────────────────

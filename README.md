@@ -28,8 +28,8 @@ That brings `zstandard`, the codec every EVPanda SDK compresses batches
 with, and nothing else. Two optional extras add the outbound adapters:
 
 ```sh
-pip install 'evpanda[httpx]'     # evpanda.ocpi.HTTPXTransport
-pip install 'evpanda[requests]'  # evpanda.ocpi.RequestsAdapter
+pip install 'evpanda[httpx]'     # evpanda.ocpi.httpx_transport
+pip install 'evpanda[requests]'  # evpanda.ocpi.requests_adapter
 ```
 
 ## Quick start
@@ -126,12 +126,14 @@ returns.
 `evpanda.ocpi` wraps the HTTP layers your service already speaks, so you don't
 have to assemble exchanges yourself. Four adapters, one per layer:
 
+Each lives in the module named after what it wraps:
+
 | Adapter | Direction | For |
 |---|---|---|
 | `evpanda.ocpi.wsgi.WSGIMiddleware` | inbound | Flask, Django, Pyramid, any WSGI app |
 | `evpanda.ocpi.asgi.ASGIMiddleware` | inbound | FastAPI, Starlette, Litestar, any ASGI app |
-| `evpanda.ocpi.HTTPXTransport` | outbound | `httpx` (`AsyncHTTPXTransport` for async) |
-| `evpanda.ocpi.RequestsAdapter` | outbound | `requests` |
+| `evpanda.ocpi.httpx_transport.HTTPXTransport` | outbound | `httpx` (`AsyncHTTPXTransport` for async) |
+| `evpanda.ocpi.requests_adapter.RequestsAdapter` | outbound | `requests` |
 
 ```python
 from evpanda.ocpi.asgi import ASGIMiddleware
@@ -143,7 +145,7 @@ app.wsgi_app = WSGIMiddleware(app.wsgi_app, panda)   # Flask
 
 ```python
 import httpx
-from evpanda.ocpi import HTTPXTransport
+from evpanda.ocpi.httpx_transport import HTTPXTransport
 
 client = httpx.Client(transport=HTTPXTransport(panda))
 ```
