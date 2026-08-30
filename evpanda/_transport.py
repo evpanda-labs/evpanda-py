@@ -1,8 +1,8 @@
 """Hand-rolled transport over :mod:`urllib.request`.
 
-Body: JSON, compressed above a size floor. It owns the bounded retry — 200
-or 400/401/413 is terminal, 5xx and network errors back off; the caller
-never retries. It never raises.
+Body: JSON, zstd-compressed above a size floor. It owns the bounded retry
+— 200 or 400/401/413 is terminal, 5xx and network errors back off; the
+caller never retries. It never raises.
 
 The ``POST /v1/{protocol}`` call lives in :meth:`Transport._post`. No
 generated client, which would pull heavy transitive dependencies into
@@ -14,16 +14,15 @@ the way an enterprise deployment expects.
 from __future__ import annotations
 
 import base64
-import functools
-import gzip
 import json
 import logging
 import random
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
 from typing import Literal, TypedDict
+
+import zstandard
 
 from ._buffer import BufferedMessage
 from ._config import LogMode, ResolvedConfig
@@ -32,23 +31,13 @@ from ._types import Message, OCPIMessage, Protocol, coerce_body
 
 # ── Compression ──────────────────────────────────────────────────────────
 #
-# The ingestion API accepts gzip, zstd, or an uncompressed body. gzip is
-# stdlib, so the SDK has no hard runtime dependency; `zstandard` is an
-# optional extra (`pip install evpanda[zstd]`) that compresses better and
-# faster, and is picked automatically when it is installed.
+# zstd is the codec, and the SDK's one runtime dependency. Every EVPanda
+# SDK compresses the same way, so a batch on the wire looks the same
+# whichever language sent it, and the ingestion API's capacity planning
+# holds across all of them. (It also accepts gzip and uncompressed bodies;
+# neither is used.)
 
-type ContentEncoding = Literal["identity", "gzip", "zstd"]
-
-
-@functools.cache
-def _zstd_compress() -> Callable[[bytes], bytes] | None:
-    """Resolve zstd's one-shot compressor once; None when the extra is absent."""
-    try:
-        from zstandard import compress
-    except ImportError:
-        return None
-    return compress
-
+type ContentEncoding = Literal["identity", "zstd"]
 
 #: Below this raw size compression is not worth the CPU; the payload is
 #: sent as-is.
@@ -56,20 +45,17 @@ COMPRESS_MIN_BYTES = 1024
 
 
 def compress(raw: bytes) -> tuple[bytes, ContentEncoding]:
-    """Encode the body: zstd when available, else gzip, else identity.
+    """Encode the body with zstd, above the size floor.
 
     An uncompressed body is always a safe answer — the ingestion API
-    accepts one — so any failure degrades to identity rather than failing
-    the send.
+    accepts one — so a codec fault degrades to identity rather than
+    costing us the batch.
     """
     if len(raw) < COMPRESS_MIN_BYTES:
         return raw, "identity"
     try:
-        zstd = _zstd_compress()
-        if zstd is not None:
-            return zstd(raw), "zstd"
-        return gzip.compress(raw), "gzip"
-    except Exception:  # noqa: BLE001 - a codec fault must not cost us the batch
+        return zstandard.compress(raw), "zstd"
+    except Exception:  # noqa: BLE001 - see above
         return raw, "identity"
 
 
@@ -171,8 +157,8 @@ def record(envelope: BufferedMessage) -> OCPIIngest | OCPPIngest:
         data = message.data
         return OCPIIngest(
             captured_at=envelope.captured_at,
-            platform_id=message.identity.platform_id,
-            platform_name=message.identity.platform_name,
+            platform_id=message.identity.id,
+            platform_name=message.identity.name,
             tenant_id=_opt_str(message.identity.tenant_id),
             tenant_name=_opt_str(message.identity.tenant_name),
             direction=str(message.direction),
@@ -185,7 +171,7 @@ def record(envelope: BufferedMessage) -> OCPIIngest | OCPPIngest:
             response_body=_body_b64(coerce_body(data.response_body)),
         )
     return OCPPIngest(
-        charger_id=message.identity.charger_id,
+        charger_id=message.identity.id,
         connection_id=message.connection_id,
         tenant_id=_opt_str(message.identity.tenant_id),
         tenant_name=_opt_str(message.identity.tenant_name),

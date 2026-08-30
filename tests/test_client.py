@@ -77,9 +77,7 @@ def test_capture_buffers_a_message(ingest: IngestServer) -> None:
 def test_an_invalid_identity_is_counted_not_raised(ingest: IngestServer) -> None:
     panda = ocpi_client(ingest, flush_interval=3600.0)
     try:
-        panda.capture_inbound_message(
-            evpanda.RoamingIdentity(platform_id="", platform_name=""), exchange()
-        )
+        panda.capture_inbound_message(evpanda.Platform(id="", name=""), exchange())
         assert panda.stats().dropped_invalid == 1
     finally:
         panda.close(timeout=5)

@@ -13,7 +13,7 @@ from conftest import FakeCapturer
 from evpanda.ocpi import RequestInfo, set_identity, use_identity
 from evpanda.ocpi.asgi import ASGIMiddleware
 
-PARTNER = evpanda.RoamingIdentity(platform_id="acme", platform_name="Acme Mobility")
+PARTNER = evpanda.Platform(id="acme", name="Acme Mobility")
 
 
 def scope_for(**overrides: Any) -> dict[str, Any]:
@@ -166,14 +166,14 @@ def test_a_websocket_scope_passes_straight_through() -> None:
 def test_a_custom_resolver_replaces_the_default() -> None:
     client = FakeCapturer()
 
-    def by_header(info: RequestInfo) -> evpanda.RoamingIdentity | None:
+    def by_header(info: RequestInfo) -> evpanda.Platform | None:
         party = info.headers.get("ocpi-from-party-id")
-        return None if party is None else evpanda.RoamingIdentity(party, party)
+        return None if party is None else evpanda.Platform(party, party)
 
     scope = scope_for(headers=[(b"ocpi-from-party-id", b"ACM")])
     run(ASGIMiddleware(echo_app(), client, resolver=by_header), scope)
 
-    assert client.inbound[0][0].platform_id == "ACM"
+    assert client.inbound[0][0].id == "ACM"
 
 
 def test_an_oversize_body_drops_the_exchange() -> None:

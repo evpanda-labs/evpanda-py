@@ -9,17 +9,17 @@ import pytest
 from evpanda._buffer import BufferedMessage, RingBuffer, now_iso
 from evpanda._stats import Counters, DropReason
 from evpanda._types import (
-    ChargerIdentity,
+    Charger,
     HTTPExchange,
     OCPIDirection,
     OCPIMessage,
     OCPPDirection,
     OCPPEventType,
     OCPPMessage,
-    RoamingIdentity,
+    Platform,
 )
 
-IDENTITY = ChargerIdentity(charger_id="CP-001")
+IDENTITY = Charger(id="CP-001")
 
 
 def frame(payload: bytes, connection_id: str = "c-1") -> BufferedMessage:
@@ -132,12 +132,12 @@ def test_a_connect_event_is_cheaper_than_a_message() -> None:
 def test_ocpi_accounting_charges_bodies_and_headers() -> None:
     small = OCPIMessage(
         direction=OCPIDirection.IN,
-        identity=RoamingIdentity(platform_id="a", platform_name="b"),
+        identity=Platform(id="a", name="b"),
         data=HTTPExchange(method="GET", url="/x"),
     )
     large = OCPIMessage(
         direction=OCPIDirection.IN,
-        identity=RoamingIdentity(platform_id="a", platform_name="b"),
+        identity=Platform(id="a", name="b"),
         data=HTTPExchange(
             method="GET",
             url="/x",

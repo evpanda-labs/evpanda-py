@@ -18,8 +18,8 @@ jobs:
       fail-fast: false
       matrix:
         # The floor from pyproject's requires-python, plus every release
-        # since. The SDK has no runtime dependencies, so this is the whole
-        # compatibility surface.
+        # since. The SDK has one runtime dependency, so this is very nearly
+        # the whole compatibility surface.
         python-version: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
@@ -43,11 +43,11 @@ jobs:
       - name: Pytest
         run: pytest
 
-  # The extras are optional at runtime, so prove the SDK works without
-  # them: an import of evpanda must not need httpx, requests or zstandard,
-  # and the core suite must pass on a bare install.
+  # The adapter extras are optional, so prove the SDK works without them:
+  # an import of evpanda must not need httpx or requests, and everything
+  # but their two suites must pass on a plain `pip install evpanda`.
   bare:
-    name: Test without extras
+    name: Test without the adapter extras
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -87,6 +87,24 @@ jobs:
 
       - name: Twine check
         run: twine check --strict dist/*
+
+      # The package sits at the repo root, so a test run imports the working
+      # tree whether or not the wheel is complete. Installing the built wheel
+      # and importing it from somewhere else is what proves a module, or
+      # py.typed, did not fall out of the build.
+      - name: Import the built wheel, away from the source tree
+        run: |
+          set -euo pipefail
+          python -m venv /tmp/wheel-check
+          /tmp/wheel-check/bin/pip install --quiet dist/*.whl
+          cd /tmp
+          /tmp/wheel-check/bin/python -c "
+          import importlib.resources as res
+          import evpanda, evpanda.ocpi
+          from evpanda.ocpi import asgi, wsgi
+          assert res.files('evpanda').joinpath('py.typed').is_file(), 'py.typed missing'
+          print('wheel imports cleanly:', evpanda.__version__)
+          "
 
       - uses: actions/upload-artifact@v7
         with:

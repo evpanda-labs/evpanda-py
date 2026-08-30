@@ -34,9 +34,9 @@ classifiers = [
   "Topic :: System :: Monitoring",
   "Typing :: Typed",
 ]
-# No runtime dependencies: the SDK is stdlib-only. The extras below are
-# only needed for the optional codec and the two outbound adapters.
-dependencies = []
+# One runtime dependency: zstandard, the codec every EVPanda SDK ships
+# batches with. The extras below are only for the two outbound adapters.
+dependencies = ["zstandard>=0.22"]
 
 [project.urls]
 Homepage = "https://github.com/evpanda-labs/evpanda-py"
@@ -44,8 +44,6 @@ Repository = "https://github.com/evpanda-labs/evpanda-py"
 Issues = "https://github.com/evpanda-labs/evpanda-py/issues"
 
 [project.optional-dependencies]
-# Batches are gzipped without it; zstd compresses better and faster.
-zstd = ["zstandard>=0.22"]
 # Only for evpanda.ocpi.HTTPXTransport / RequestsAdapter.
 httpx = ["httpx>=0.27"]
 requests = ["requests>=2.31"]
@@ -53,7 +51,6 @@ dev = [
   "ruff>=0.9",
   "mypy>=1.13",
   "pytest>=8",
-  "zstandard>=0.22",
   "httpx>=0.27",
   "requests>=2.31",
   "types-requests",
@@ -64,18 +61,18 @@ dev = [
 ]
 
 [tool.hatch.version]
-path = "src/evpanda/__init__.py"
+path = "evpanda/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/evpanda"]
+packages = ["evpanda"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "README.md", "LICENSE", "pyproject.toml"]
+include = ["evpanda", "tests", "README.md", "LICENSE", "pyproject.toml"]
 
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["src", "tests"]
+src = [".", "tests"]
 
 [tool.ruff.format]
 # Ruff formats fenced Python in Markdown too. The README's examples are
@@ -94,11 +91,8 @@ strict = true
 python_version = "3.12"
 # Strict on the shipped package; the tests are annotated but not gated on
 # strict-mode pedantry about their own fixtures.
-files = ["src"]
+files = ["evpanda"]
 
-[[tool.mypy.overrides]]
-module = ["zstandard"]
-ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

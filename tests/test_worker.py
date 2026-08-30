@@ -14,19 +14,19 @@ from evpanda._config import LogMode, resolve_ocpi_config, resolve_ocpp_config
 from evpanda._redact import make_ocpi_redactor
 from evpanda._stats import Counters, DropReason, Stats
 from evpanda._types import (
-    ChargerIdentity,
+    Charger,
     HTTPExchange,
     OCPIDirection,
     OCPIMessage,
     OCPPDirection,
     OCPPEventType,
     OCPPMessage,
-    RoamingIdentity,
+    Platform,
 )
 from evpanda._worker import BATCH_CAP, Worker, header_map, prepare_ocpi, prepare_ocpp
 
-PARTNER = RoamingIdentity(platform_id="acme", platform_name="Acme")
-CHARGER = ChargerIdentity(charger_id="CP-001")
+PARTNER = Platform(id="acme", name="Acme")
+CHARGER = Charger(id="CP-001")
 CAP = 1024
 
 
@@ -71,13 +71,13 @@ def test_prepare_ocpi_accepts_a_good_message() -> None:
 @pytest.mark.parametrize(
     "identity",
     [
-        RoamingIdentity(platform_id="", platform_name="Acme"),
-        RoamingIdentity(platform_id="acme", platform_name="   "),
-        RoamingIdentity(platform_id="acme", platform_name="Acme", tenant_id="t"),
-        RoamingIdentity(platform_id="acme", platform_name="Acme", tenant_name="T"),
+        Platform(id="", name="Acme"),
+        Platform(id="acme", name="   "),
+        Platform(id="acme", name="Acme", tenant_id="t"),
+        Platform(id="acme", name="Acme", tenant_name="T"),
     ],
 )
-def test_prepare_ocpi_drops_an_invalid_identity(identity: RoamingIdentity) -> None:
+def test_prepare_ocpi_drops_an_invalid_identity(identity: Platform) -> None:
     message = ocpi()
     message.identity = identity
     envelope, reason = prepare_ocpi(message, None, CAP)
@@ -93,11 +93,11 @@ def test_prepare_ocpi_drops_an_oversize_body() -> None:
 
 
 def test_a_tenant_pair_is_all_or_nothing() -> None:
-    both = RoamingIdentity(platform_id="acme", platform_name="Acme", tenant_id="t", tenant_name="T")
+    both = Platform(id="acme", name="Acme", tenant_id="t", tenant_name="T")
     assert both.valid()
-    assert ChargerIdentity(charger_id="CP", tenant_id="t", tenant_name="T").valid()
-    assert not ChargerIdentity(charger_id="CP", tenant_id="t").valid()
-    assert not ChargerIdentity(charger_id=" ").valid()
+    assert Charger(id="CP", tenant_id="t", tenant_name="T").valid()
+    assert not Charger(id="CP", tenant_id="t").valid()
+    assert not Charger(id=" ").valid()
 
 
 def test_the_chokepoint_takes_ownership() -> None:
@@ -174,7 +174,7 @@ def test_prepare_ocpp_accepts_a_good_frame() -> None:
 
 
 def test_prepare_ocpp_drops_an_invalid_identity() -> None:
-    envelope, reason = prepare_ocpp(ocpp(identity=ChargerIdentity(charger_id="")), None, CAP)
+    envelope, reason = prepare_ocpp(ocpp(identity=Charger(id="")), None, CAP)
     assert envelope is None
     assert reason is DropReason.INVALID_IDENTITY
 
@@ -247,7 +247,7 @@ def test_a_flush_chunks_at_the_batch_cap() -> None:
 
 def test_capture_counts_its_drops() -> None:
     worker, _, counters = build_worker()
-    worker.capture_ocpp(ocpp(identity=ChargerIdentity(charger_id="")))
+    worker.capture_ocpp(ocpp(identity=Charger(id="")))
     worker.capture_ocpp(ocpp(payload=b"x" * (64 * 1024 + 1)))
 
     stats = counters.snapshot()

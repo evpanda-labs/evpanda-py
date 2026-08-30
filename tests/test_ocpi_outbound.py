@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
+import sys
 from typing import Any
 
 import pytest
@@ -24,7 +26,7 @@ from evpanda.ocpi.requests_adapter import (  # noqa: E402
     instrument_session,
 )
 
-PARTNER = evpanda.RoamingIdentity(platform_id="acme", platform_name="Acme Mobility")
+PARTNER = evpanda.Platform(id="acme", name="Acme Mobility")
 URL = "https://partner.example/ocpi/2.2/sessions"
 
 
@@ -37,6 +39,29 @@ def mock_transport(
         return httpx.Response(status, headers={"content-type": "application/json"}, content=body)
 
     return httpx.MockTransport(handler)
+
+
+def test_a_missing_extra_names_the_install_command() -> None:
+    """The import error has to say what to install, not just what is absent."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def without_httpx(name: str, *args: Any) -> Any:
+        if name == "httpx":
+            raise ImportError("No module named 'httpx'")
+        return real_import(name, *args)
+
+    for module in ("evpanda.ocpi.httpx_transport", "evpanda.ocpi.requests_adapter"):
+        sys.modules.pop(module, None)
+    builtins.__import__ = without_httpx
+    try:
+        with pytest.raises(ImportError, match=r"pip install 'evpanda\[httpx\]'"):
+            importlib.import_module("evpanda.ocpi.httpx_transport")
+    finally:
+        builtins.__import__ = real_import
+        sys.modules.pop("evpanda.ocpi.httpx_transport", None)
+        importlib.import_module("evpanda.ocpi.httpx_transport")
 
 
 # ── httpx, synchronous ───────────────────────────────────────────────────
@@ -182,15 +207,15 @@ def test_a_closed_client_still_strips_the_headers() -> None:
 def test_a_custom_resolver_replaces_the_default() -> None:
     client = FakeCapturer()
 
-    def by_host(info: RequestInfo) -> evpanda.RoamingIdentity | None:
+    def by_host(info: RequestInfo) -> evpanda.Platform | None:
         host = httpx.URL(info.url).host
-        return evpanda.RoamingIdentity(platform_id=host, platform_name=host)
+        return evpanda.Platform(id=host, name=host)
 
     transport = HTTPXTransport(client, mock_transport([]), resolver=by_host)
     with httpx.Client(transport=transport) as http:
         http.get(URL)
 
-    assert client.outbound[0][0].platform_id == "partner.example"
+    assert client.outbound[0][0].id == "partner.example"
 
 
 # ── httpx, asynchronous ──────────────────────────────────────────────────

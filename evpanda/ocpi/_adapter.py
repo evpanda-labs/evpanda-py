@@ -16,7 +16,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from .._types import HTTPExchange, RoamingIdentity
+from .._types import HTTPExchange, Platform
 
 # ── The client seam ──────────────────────────────────────────────────────
 
@@ -29,9 +29,9 @@ class Capturer(Protocol):
     explicit and lets a test drive an adapter without a running pipeline.
     """
 
-    def capture_inbound_message(self, identity: RoamingIdentity, data: HTTPExchange) -> None: ...
+    def capture_inbound_message(self, identity: Platform, data: HTTPExchange) -> None: ...
 
-    def capture_outbound_message(self, identity: RoamingIdentity, data: HTTPExchange) -> None: ...
+    def capture_outbound_message(self, identity: Platform, data: HTTPExchange) -> None: ...
 
     def capturing(self) -> int | None: ...
 
@@ -83,7 +83,9 @@ def guard(fn: Callable[[], None]) -> None:
 IDENTITY_KEY = "evpanda.identity"
 
 #: Request headers the shipped resolver reads as a last fallback. Matching
-#: is case-insensitive; the adapters lowercase what they collect.
+#: is case-insensitive; the adapters lowercase what they collect. The wire
+#: names are unchanged by the Platform rename — they carry Platform.id,
+#: Platform.name, Platform.tenant_id and Platform.tenant_name.
 HEADER_PLATFORM_ID = "x-evpanda-platform-id"
 HEADER_PLATFORM_NAME = "x-evpanda-platform-name"
 HEADER_TENANT_ID = "x-evpanda-tenant-id"
@@ -99,12 +101,10 @@ IDENTITY_HEADERS = (
     HEADER_TENANT_NAME,
 )
 
-_identity_var: ContextVar[RoamingIdentity | None] = ContextVar(
-    "evpanda_ocpi_identity", default=None
-)
+_identity_var: ContextVar[Platform | None] = ContextVar("evpanda_ocpi_identity", default=None)
 
 
-def set_identity(carrier: MutableMapping[str, Any], identity: RoamingIdentity) -> None:
+def set_identity(carrier: MutableMapping[str, Any], identity: Platform) -> None:
     """Stamp the partner's identity on a WSGI environ or an ASGI scope.
 
     Do it wherever you already look the partner up::
@@ -113,8 +113,8 @@ def set_identity(carrier: MutableMapping[str, Any], identity: RoamingIdentity) -
             def middleware(environ, start_response):
                 partner = lookup(environ.get("HTTP_AUTHORIZATION"))
                 if partner:
-                    ocpi.set_identity(environ, evpanda.RoamingIdentity(
-                        platform_id=partner.id, platform_name=partner.name,
+                    ocpi.set_identity(environ, evpanda.Platform(
+                        id=partner.id, name=partner.name,
                     ))
                 return app(environ, start_response)
             return middleware
@@ -125,16 +125,16 @@ def set_identity(carrier: MutableMapping[str, Any], identity: RoamingIdentity) -
     carrier[IDENTITY_KEY] = identity
 
 
-def identity_from(carrier: Mapping[str, Any] | None) -> RoamingIdentity | None:
+def identity_from(carrier: Mapping[str, Any] | None) -> Platform | None:
     """The identity :func:`set_identity` stamped on a mapping, if any."""
     if not isinstance(carrier, Mapping):
         return None
     value = carrier.get(IDENTITY_KEY)
-    return value if isinstance(value, RoamingIdentity) else None
+    return value if isinstance(value, Platform) else None
 
 
 @contextmanager
-def use_identity(identity: RoamingIdentity) -> Iterator[None]:
+def use_identity(identity: Platform) -> Iterator[None]:
     """Attribute every OCPI call made inside the block to ``identity``.
 
     The natural way to attribute an outgoing call, where there is no
@@ -153,12 +153,12 @@ def use_identity(identity: RoamingIdentity) -> Iterator[None]:
         _identity_var.reset(token)
 
 
-def current_identity() -> RoamingIdentity | None:
+def current_identity() -> Platform | None:
     """The identity :func:`use_identity` is currently in scope for, if any."""
     return _identity_var.get()
 
 
-def identity_from_headers(headers: Mapping[str, str]) -> RoamingIdentity | None:
+def identity_from_headers(headers: Mapping[str, str]) -> Platform | None:
     """The identity carried by the ``X-EVPanda-*`` headers, if any.
 
     Tenant stays all-or-nothing: set both tenant values or neither, since a
@@ -168,9 +168,9 @@ def identity_from_headers(headers: Mapping[str, str]) -> RoamingIdentity | None:
     platform_name = headers.get(HEADER_PLATFORM_NAME, "").strip()
     if not platform_id and not platform_name:
         return None
-    return RoamingIdentity(
-        platform_id=platform_id,
-        platform_name=platform_name,
+    return Platform(
+        id=platform_id,
+        name=platform_name,
         tenant_id=headers.get(HEADER_TENANT_ID, "").strip() or None,
         tenant_name=headers.get(HEADER_TENANT_NAME, "").strip() or None,
     )
@@ -193,7 +193,7 @@ class RequestInfo:
     #: Whatever the adapter's own carrier held: the value
     #: :func:`set_identity` put on the WSGI environ or ASGI scope, or an
     #: httpx request extension.
-    identity: RoamingIdentity | None = None
+    identity: Platform | None = None
     #: The framework-native object, for a resolver that needs more than the
     #: fields above: the WSGI environ, the ASGI scope, the ``httpx.Request``
     #: or the ``requests.PreparedRequest``.
@@ -203,10 +203,10 @@ class RequestInfo:
 #: Derives the roaming partner's identity for one request. Returning None —
 #: or an identity that fails validation — means the exchange is not
 #: captured; the request itself is never blocked or altered because of it.
-type Resolver = Callable[[RequestInfo], RoamingIdentity | None]
+type Resolver = Callable[[RequestInfo], Platform | None]
 
 
-def default_resolver(info: RequestInfo) -> RoamingIdentity | None:
+def default_resolver(info: RequestInfo) -> Platform | None:
     """What every adapter uses when no resolver is configured.
 
     The request mapping first, then the :func:`use_identity` ContextVar,
@@ -221,7 +221,7 @@ def default_resolver(info: RequestInfo) -> RoamingIdentity | None:
     return identity_from_headers(info.headers)
 
 
-def resolve(resolver: Resolver | None, info: RequestInfo) -> RoamingIdentity | None:
+def resolve(resolver: Resolver | None, info: RequestInfo) -> Platform | None:
     """Run a resolver under a guard and validate what it returns.
 
     A resolver that raises, returns None, or returns an invalid identity
@@ -231,7 +231,7 @@ def resolve(resolver: Resolver | None, info: RequestInfo) -> RoamingIdentity | N
         identity = (resolver or default_resolver)(info)
     except Exception:  # noqa: BLE001 - a broken resolver must not fail the request
         return None
-    if identity is None or not isinstance(identity, RoamingIdentity):
+    if identity is None or not isinstance(identity, Platform):
         return None
     return identity if identity.valid() else None
 
@@ -273,6 +273,13 @@ class CappedBody:
                 return
             self._chunks.append(bytes(chunk))
             self._size += len(chunk)
+
+    def overflow(self) -> None:
+        """Mark the body too large to keep, without having to read it."""
+        with self._lock:
+            self._overflowed = True
+            self._chunks = []
+            self._size = 0
 
     def result(self) -> tuple[bytes | None, bool]:
         """The accumulated bytes and whether the cap was exceeded."""
@@ -325,7 +332,7 @@ class Exchange:
 
 def ship(
     client: Capturer,
-    identity: RoamingIdentity,
+    identity: Platform,
     exchange: Exchange,
     *,
     inbound: bool,

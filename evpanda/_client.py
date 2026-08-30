@@ -37,14 +37,14 @@ from ._stats import Counters, DropReason, Stats
 from ._transport import Transport
 from ._types import (
     BodyInput,
-    ChargerIdentity,
+    Charger,
     HTTPExchange,
     OCPIDirection,
     OCPIMessage,
     OCPPDirection,
     OCPPEventType,
     OCPPMessage,
-    RoamingIdentity,
+    Platform,
 )
 from ._worker import Worker
 
@@ -277,7 +277,7 @@ class OCPIClient(_Client):
         #: to redact".
         self._redact: OCPIRedactor | None = None
 
-    def capture_inbound_message(self, identity: RoamingIdentity, data: HTTPExchange) -> None:
+    def capture_inbound_message(self, identity: Platform, data: HTTPExchange) -> None:
         """Buffer an inbound OCPI message (partner → host) for delivery.
 
         Non-blocking and never raises; a message with an invalid identity
@@ -288,7 +288,7 @@ class OCPIClient(_Client):
             lambda: self._capture_ocpi(identity, data, OCPIDirection.IN),
         )
 
-    def capture_outbound_message(self, identity: RoamingIdentity, data: HTTPExchange) -> None:
+    def capture_outbound_message(self, identity: Platform, data: HTTPExchange) -> None:
         """Buffer an outbound OCPI message (host → partner) for delivery.
 
         Non-blocking and never raises; a message with an invalid identity
@@ -300,7 +300,7 @@ class OCPIClient(_Client):
         )
 
     def _capture_ocpi(
-        self, identity: RoamingIdentity, data: HTTPExchange, direction: OCPIDirection
+        self, identity: Platform, data: HTTPExchange, direction: OCPIDirection
     ) -> None:
         """Stamp the direction and hand the message to the worker, which runs
         the validate → cap → own → redact chokepoint.
@@ -359,7 +359,7 @@ class OCPPClient(_Client):
       :meth:`capture_disconnect` — the flat primitives the session is built
       on, for one-off capture.
 
-    ``identity`` is a :class:`~evpanda.ChargerIdentity` value, not a
+    ``identity`` is a :class:`~evpanda.Charger` value, not a
     resolver: OCPP identity is known at connect time. An invalid one drops
     the message.
     """
@@ -372,7 +372,7 @@ class OCPPClient(_Client):
         #: chokepoint reads None as "nothing to redact". See _redact.py.
         self._redact: OCPPRedactor | None = None
 
-    def connection(self, identity: ChargerIdentity) -> OCPPSession:
+    def connection(self, identity: Charger) -> OCPPSession:
         """Open a capture session for one OCPP connection.
 
         It mints a connection ID, records the connect, and hands back the
@@ -384,7 +384,7 @@ class OCPPClient(_Client):
         self.capture_connect(identity, connection_id)
         return OCPPSession(self, identity, connection_id)
 
-    def capture_connect(self, identity: ChargerIdentity, connection_id: str) -> None:
+    def capture_connect(self, identity: Charger, connection_id: str) -> None:
         """Record a new OCPP connection. Non-blocking and never raises."""
         self._guard(
             "capture_connect",
@@ -399,7 +399,7 @@ class OCPPClient(_Client):
 
     def capture_message(
         self,
-        identity: ChargerIdentity,
+        identity: Charger,
         connection_id: str,
         data: BodyInput,
         direction: OCPPDirection,
@@ -424,7 +424,7 @@ class OCPPClient(_Client):
             ),
         )
 
-    def capture_disconnect(self, identity: ChargerIdentity, connection_id: str) -> None:
+    def capture_disconnect(self, identity: Charger, connection_id: str) -> None:
         """Record the connection closing. Non-blocking and never raises."""
         self._guard(
             "capture_disconnect",
@@ -463,7 +463,7 @@ class OCPPSession:
 
     __slots__ = ("_client", "_identity", "connection_id")
 
-    def __init__(self, client: OCPPClient, identity: ChargerIdentity, connection_id: str) -> None:
+    def __init__(self, client: OCPPClient, identity: Charger, connection_id: str) -> None:
         #: The SDK-minted ID for this connection — fresh per
         #: :meth:`OCPPClient.connection` call, which is how the ingestion
         #: side separates one charger's sessions across reconnects.

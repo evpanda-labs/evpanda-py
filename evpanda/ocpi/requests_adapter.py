@@ -12,10 +12,15 @@ from __future__ import annotations
 
 from typing import Any
 
-import requests
-from requests.adapters import HTTPAdapter
+try:
+    import requests
+    from requests.adapters import HTTPAdapter
+except ImportError as exc:  # pragma: no cover - exercised by the bare install
+    raise ImportError(
+        "evpanda.ocpi.requests_adapter needs `requests` — pip install 'evpanda[requests]'"
+    ) from exc
 
-from .._types import RoamingIdentity
+from .._types import Platform
 from ._adapter import (
     IDENTITY_HEADERS,
     CappedBody,
@@ -103,7 +108,7 @@ class RequestsAdapter(HTTPAdapter):
 
     def _capture(
         self,
-        identity: RoamingIdentity,
+        identity: Platform,
         exchange: Exchange,
         response: requests.Response,
         stream: bool,

@@ -21,9 +21,9 @@ def test_an_inbound_ocpi_exchange_arrives_intact(ingest: IngestServer) -> None:
     panda = ocpi_client(ingest, flush_interval=3600.0)
     try:
         panda.capture_inbound_message(
-            evpanda.RoamingIdentity(
-                platform_id="acme",
-                platform_name="Acme Mobility",
+            evpanda.Platform(
+                id="acme",
+                name="Acme Mobility",
                 tenant_id="t-1",
                 tenant_name="Tenant One",
             ),
@@ -215,7 +215,7 @@ def test_capture_flush_and_close_race_safely(ingest: IngestServer) -> None:
     assert panda.stats().captured == 800
 
 
-def test_the_body_is_compressed_above_the_floor(ingest: IngestServer) -> None:
+def test_the_body_is_zstd_compressed_above_the_floor(ingest: IngestServer) -> None:
     panda = ocpi_client(ingest, flush_interval=3600.0)
     try:
         for _ in range(50):
@@ -224,7 +224,7 @@ def test_the_body_is_compressed_above_the_floor(ingest: IngestServer) -> None:
     finally:
         panda.close(timeout=5)
 
-    assert ingest.received[0].headers.get("content-encoding") in ("zstd", "gzip")
+    assert ingest.received[0].headers.get("content-encoding") == "zstd"
 
 
 def test_a_small_body_goes_out_uncompressed(ingest: IngestServer) -> None:
@@ -259,7 +259,7 @@ panda = evpanda.start_ocpi(evpanda.OCPIConfig(
     endpoint={ingest.url!r}, api_key="k", flush_interval=3600.0,
 ))
 panda.capture_inbound_message(
-    evpanda.RoamingIdentity(platform_id="acme", platform_name="Acme Mobility"),
+    evpanda.Platform(id="acme", name="Acme Mobility"),
     evpanda.HTTPExchange(method="GET", url="/ocpi/2.2/versions", status_code=200),
 )
 # and then the process simply ends, without close()
@@ -275,9 +275,7 @@ panda.capture_inbound_message(
 def test_stats_survive_the_client(ingest: IngestServer) -> None:
     panda = ocpi_client(ingest, flush_interval=3600.0)
     panda.capture_inbound_message(PARTNER, exchange())
-    panda.capture_inbound_message(
-        evpanda.RoamingIdentity(platform_id="", platform_name=""), exchange()
-    )
+    panda.capture_inbound_message(evpanda.Platform(id="", name=""), exchange())
     panda.close(timeout=5)
 
     final: Any = panda.stats()

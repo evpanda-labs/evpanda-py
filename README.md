@@ -9,10 +9,10 @@ them in batches to the EVPanda ingestion API.
 
 - **Non-blocking.** Capture calls never wait on the network and never raise
   into your process.
-- **Bounded.** Memory is capped by a byte budget you set; under pressure the
-  SDK drops its own data rather than yours.
+- **Bounded.** Undelivered captures are capped by a byte budget you set; under
+  pressure the SDK drops its own data rather than yours.
 - **Safe by default.** Secrets are stripped before anything is buffered.
-- **Small.** No runtime dependencies, one background thread per client.
+- **Small.** One runtime dependency, one background thread per client.
 
 ## Requirements
 
@@ -24,13 +24,12 @@ Python 3.12 or later.
 pip install evpanda
 ```
 
-The SDK itself is stdlib-only. Three optional extras add a faster codec and the
-two outbound adapters:
+That brings `zstandard`, the codec every EVPanda SDK compresses batches
+with, and nothing else. Two optional extras add the outbound adapters:
 
 ```sh
-pip install 'evpanda[zstd]'      # zstd instead of gzip for batch compression
-pip install 'evpanda[httpx]'     # evpanda.ocpi.HTTPXTransport
-pip install 'evpanda[requests]'  # evpanda.ocpi.RequestsAdapter
+pip install 'evpanda[httpx]'     # evpanda.ocpi.httpx_transport
+pip install 'evpanda[requests]'  # evpanda.ocpi.requests_adapter
 ```
 
 ## Quick start
@@ -60,7 +59,8 @@ if panda.error:
     log.warning("%s (running inert)", panda.error)
 
 async def handle_charger(websocket):
-    identity = resolve_charger_identity(websocket)  # however your CSMS does it
+    # However your CSMS identifies a charge point at handshake time.
+    identity = resolve_charger_identity(websocket)  # -> evpanda.Charger(id="CP-001")
     if identity is None:
         await websocket.close(code=1008)
         return
@@ -103,7 +103,7 @@ if panda.error:
     log.warning("%s (running inert)", panda.error)
 
 panda.capture_inbound_message(
-    identity=evpanda.RoamingIdentity(platform_id="acme", platform_name="Acme Mobility"),
+    identity=evpanda.Platform(id="acme", name="Acme Mobility"),
     data=evpanda.HTTPExchange(
         method="POST",
         url="/ocpi/2.2/cdrs",
@@ -125,14 +125,15 @@ returns.
 ## HTTP adapters
 
 `evpanda.ocpi` wraps the HTTP layers your service already speaks, so you don't
-have to assemble exchanges yourself. Four adapters, one per layer:
+have to assemble exchanges yourself. Four adapters, one per layer, each in the
+module named after what it wraps:
 
 | Adapter | Direction | For |
 |---|---|---|
 | `evpanda.ocpi.wsgi.WSGIMiddleware` | inbound | Flask, Django, Pyramid, any WSGI app |
 | `evpanda.ocpi.asgi.ASGIMiddleware` | inbound | FastAPI, Starlette, Litestar, any ASGI app |
-| `evpanda.ocpi.HTTPXTransport` | outbound | `httpx` (`AsyncHTTPXTransport` for async) |
-| `evpanda.ocpi.RequestsAdapter` | outbound | `requests` |
+| `evpanda.ocpi.httpx_transport.HTTPXTransport` | outbound | `httpx` (`AsyncHTTPXTransport` for async) |
+| `evpanda.ocpi.requests_adapter.RequestsAdapter` | outbound | `requests` |
 
 ```python
 from evpanda.ocpi.asgi import ASGIMiddleware
@@ -144,10 +145,23 @@ app.wsgi_app = WSGIMiddleware(app.wsgi_app, panda)   # Flask
 
 ```python
 import httpx
-from evpanda.ocpi import HTTPXTransport
+from evpanda.ocpi.httpx_transport import HTTPXTransport
 
 client = httpx.Client(transport=HTTPXTransport(panda))
 ```
+
+> **If your client sets `verify`, `cert`, `limits`, `proxy` or `http2`**, pass a
+> base transport carrying them. httpx applies those arguments only when it
+> builds its own transport, so supplying `transport=` silently drops them —
+> including the TLS ones:
+>
+> ```python
+> base = httpx.HTTPTransport(verify=ctx, limits=httpx.Limits(max_connections=50))
+> client = httpx.Client(transport=HTTPXTransport(panda, base))
+> ```
+>
+> Client-level settings that are not transport arguments — `timeout`,
+> `follow_redirects`, `headers`, `auth` — are unaffected.
 
 A request with no resolvable identity is served exactly as it would have
 been — it just isn't captured.
@@ -159,21 +173,34 @@ the request's own mapping — the WSGI environ or the ASGI scope:
 
 ```python
 from evpanda.ocpi import set_identity
+from starlette.middleware.base import BaseHTTPMiddleware
 
-@app.middleware("http")
 async def authenticate(request, call_next):
     partner = lookup_partner(request.headers.get("authorization"))
     if partner is None:
         return JSONResponse({"status_code": 2001}, status_code=401)
-    set_identity(request.scope, evpanda.RoamingIdentity(
-        platform_id=partner.id, platform_name=partner.name,
+    set_identity(request.scope, evpanda.Platform(
+        id=partner.id, name=partner.name,
     ))
     return await call_next(request)
+
+app.add_middleware(BaseHTTPMiddleware, dispatch=authenticate)
+# FastAPI keeps the decorator form: @app.middleware("http")
 ```
 
-The mapping is read when the response finishes, so **mount order doesn't
-matter**: your auth layer can sit inside or outside the capture middleware and
-either way the identity is seen.
+The scope is read when the response finishes, so **it does not matter where you
+stamp it**. Your auth layer can sit inside or outside the capture middleware,
+and a service that authenticates in the route handler itself can stamp it
+there:
+
+```python
+async def cdrs(request):
+    partner = authenticate(request)          # however your service does it
+    set_identity(request.scope, evpanda.Platform(
+        id=partner.id, name=partner.name,
+    ))
+    ...
+```
 
 Outbound, use the context manager — you have already looked the partner up to
 get their token:
@@ -181,7 +208,7 @@ get their token:
 ```python
 from evpanda.ocpi import use_identity
 
-with use_identity(evpanda.RoamingIdentity(platform_id=partner.id, platform_name=partner.name)):
+with use_identity(evpanda.Platform(id=partner.id, name=partner.name)):
     response = client.post(f"{partner.url}/ocpi/2.2/sessions", json=payload,
                            headers={"Authorization": f"Token {partner.token_b}"})
 ```
@@ -200,11 +227,11 @@ If identity lives somewhere else entirely — a client certificate, a path prefi
 ```python
 from evpanda.ocpi import RequestInfo
 
-def by_path(info: RequestInfo) -> evpanda.RoamingIdentity | None:
+def by_path(info: RequestInfo) -> evpanda.Platform | None:
     if not info.url.startswith("/partners/"):
         return None                      # not captured
     name = info.url.removeprefix("/partners/").split("/")[0]
-    return evpanda.RoamingIdentity(platform_id=name, platform_name=name)
+    return evpanda.Platform(id=name, name=name)
 
 ASGIMiddleware(app, panda, resolver=by_path)
 ```
@@ -216,11 +243,13 @@ dropped rather than shipped as orphans.
 
 | Protocol | Type | Required fields |
 |---|---|---|
-| OCPI | `RoamingIdentity` | `platform_id`, `platform_name` |
-| OCPP | `ChargerIdentity` | `charger_id` |
+| OCPI | `Platform` | `id`, `name` |
+| OCPP | `Charger` | `id` |
 
 `tenant_id` and `tenant_name` are optional but **all-or-nothing** — set both or
-neither. Call `identity.valid()` to check one yourself.
+neither. They keep their prefix because they describe a different subject:
+which of *your* tenants an exchange belongs to, not a property of the partner
+or the charger. Call `identity.valid()` to check one yourself.
 
 ## Configuration
 
@@ -245,12 +274,31 @@ if panda.error:
 | `endpoint` | `https://ingest.evpanda.io` | Ingestion API base URL. Set only to reach another environment |
 | `api_key` | `$EVPANDA_API_KEY` | Sent as `X-API-Key`. **Required** |
 | `max_buffer_bytes` | `32 MiB` | Memory ceiling for undelivered captures; oldest are evicted past it |
-| `max_capture_bytes` | `64 KiB` | Per body / per frame cap; an oversize body drops the whole message |
+| `max_capture_bytes` | `64 KiB` | Per body / per frame cap; an oversize body drops the whole message. Also bounds what the HTTP adapters hold per in-flight request |
 | `flush_interval` | `5.0` | Maximum seconds between deliveries |
 | `drain_timeout` | `10.0` | How long `close()` waits to drain (minimum `5.0`) |
 | `log_mode` | `"errors"` | `"silent"`, `"errors"`, `"debug"` |
 | `logger` | `logging.getLogger("evpanda")` | Where the SDK's own logs go |
 | `ocpi_allowed_headers` | `()` | *(OCPI only)* Extra headers to capture, on top of the defaults |
+
+## Memory
+
+`max_buffer_bytes` caps everything waiting to be delivered — that is the number
+to provision against, and the SDK evicts rather than exceed it.
+
+The HTTP adapters add a second, smaller cost: while a request is in flight they
+hold a copy of its bodies, bounded per request by `max_capture_bytes` and
+released as soon as the exchange is captured. That cost scales with concurrency
+rather than with the buffer, and with the bodies that actually pass rather than
+with the cap — ordinary OCPI traffic barely registers. The WSGI adapter is the
+one that pays it even for a handler that never reads the body, since it takes
+the body up front; a server taking large CDR pushes at high concurrency should
+count on roughly one extra copy of each in-flight body. Calling
+`capture_inbound_message` yourself instead of using an adapter avoids it
+entirely, since you already hold the bytes.
+
+It is deliberately not bounded in aggregate. Doing that would mean making a
+request wait on a capture budget, and capture never blocks the host.
 
 ## Logging
 

@@ -471,7 +471,7 @@
         <div><dt>Distribution</dt><dd>evpanda (PyPI)</dd></div>
         <div><dt>Package</dt><dd>evpanda</dd></div>
         <div><dt>Python</dt><dd>3.12+</dd></div>
-        <div><dt>Runtime deps</dt><dd>none</dd></div>
+        <div><dt>Runtime deps</dt><dd>zstandard</dd></div>
         <div><dt>Threads</dt><dd>1 per client</dd></div>
         <div><dt>Reference SDK</dt><dd>evpanda-go</dd></div>
       </dl>
@@ -535,7 +535,9 @@
         <p><b>Memory is bounded, and the bound is a number you provision
         against.</b> <code>max_buffer_bytes</code> is the ceiling on everything
         held awaiting delivery — 32&nbsp;MiB by default, allocated on demand.
-        Under stress the SDK evicts rather than accumulating.</p>
+        Under stress the SDK evicts rather than accumulating. The adapters add
+        a second cost outside that ceiling, one bounded copy per in-flight
+        request; §15 says why it is not folded in.</p>
       </div>
 
       <div class="rule-box">
@@ -585,7 +587,7 @@
       </p>
 
       <figure>
-<pre role="img" aria-label="File map: the evpanda package holding the capture pipeline, and the ocpi subpackage holding the four adapters">src/evpanda/
+<pre role="img" aria-label="File map: the evpanda package holding the capture pipeline, and the ocpi subpackage holding the four adapters">evpanda/
 │
 ├── __init__.py            the public surface, and only that
 ├── _types.py              identities · HTTPExchange · internal messages · size()
@@ -598,7 +600,7 @@
 ├── _client.py             lifecycle core · OCPIClient · OCPPClient · sessions
 │
 └── ocpi/                  the adapters — the only public submodule
-    ├── __init__.py        the seam · identity carriers · lazy adapter exports
+    ├── __init__.py        the seam · identity carriers · resolver contract
     ├── _adapter.py        Capturer · Resolver · capped bodies · shipping
     ├── wsgi.py            WSGIMiddleware          (stdlib only)
     ├── asgi.py            ASGIMiddleware          (stdlib only)
@@ -632,48 +634,48 @@
       <p>
         Two of the four adapters need a third-party import, and neither may
         become a dependency of the SDK: nobody should install
-        <code>requests</code> to capture OCPP traffic. So
-        <code>evpanda.ocpi</code> imports the two stdlib adapters eagerly and
-        the other two on first use, through a module
-        <code>__getattr__</code> (PEP&nbsp;562):
+        <code>requests</code> to capture OCPP traffic. The rule that follows
+        is the whole of the packaging story — <b>each adapter lives in the
+        module named after what it wraps, and you import it from there</b>:
       </p>
 
       <div class="code">
-        <div class="cap">ocpi/__init__.py — lazy by name, not by try/except</div>
-<pre><code><span class="c"># Which module each lazily-imported name lives in, and what to install
-# if it is missing.</span>
-_LAZY = {
-    "HTTPXTransport":      ("httpx_transport", "httpx"),
-    "AsyncHTTPXTransport": ("httpx_transport", "httpx"),
-    "RequestsAdapter":     ("requests_adapter", "requests"),
-    "instrument_session":  ("requests_adapter", "requests"),
-}
-
-def __getattr__(name: str) -&gt; Any:
-    entry = _LAZY.get(name)
-    if entry is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    module_name, extra = entry
-    try:
-        module = __import__(f"{__name__}.{module_name}", fromlist=[name])
-    except ImportError as exc:
-        raise ImportError(
-            f"{__name__}.{name} needs `{extra}` — pip install 'evpanda[{extra}]'"
-        ) from exc
-    return getattr(module, name)</code></pre>
+        <div class="cap">one rule, four adapters</div>
+<pre><code>from evpanda.ocpi.wsgi import WSGIMiddleware
+from evpanda.ocpi.asgi import ASGIMiddleware
+from evpanda.ocpi.httpx_transport import HTTPXTransport, AsyncHTTPXTransport
+from evpanda.ocpi.requests_adapter import RequestsAdapter, instrument_session</code></pre>
       </div>
 
       <p>
-        The alternative — a top-level <code>try: import httpx / except
-        ImportError: HTTPXTransport = None</code> — fails in the direction that
-        costs a user an afternoon: a missing extra turns into
-        <code>TypeError: 'NoneType' object is not callable</code> at the call
-        site. This way the error names the package <em>and</em> the install
-        command, and <code>import evpanda.ocpi</code> stays free of
-        third-party imports either way. Type checkers see the names through a
-        <code>TYPE_CHECKING</code> block, so completion and <code>mypy</code>
-        work as if they were imported normally.
+        So importing <code>evpanda.ocpi</code> pulls in nothing but the
+        standard library, and a host that only serves OCPI never loads an HTTP
+        client it does not use. Each third-party module says what to install
+        when its import fails:
       </p>
+
+      <div class="code">
+        <div class="cap">ocpi/httpx_transport.py — five lines, at the top</div>
+<pre><code>try:
+    import httpx
+except ImportError as exc:
+    raise ImportError(
+        "evpanda.ocpi.httpx_transport needs `httpx` — pip install 'evpanda[httpx]'"
+    ) from exc</code></pre>
+      </div>
+
+      <div class="note">
+        <p>
+          An earlier revision re-exported all four from the package and
+          imported the two third-party ones lazily, through a module
+          <code>__getattr__</code> (PEP&nbsp;562) driven by a name-to-module
+          table. It worked, and it was the wrong trade: thirty lines of
+          machinery, a <code>TYPE_CHECKING</code> block to keep type checkers
+          working, and — worse — two import styles for four adapters, since
+          the stdlib pair were imported from their modules and the other two
+          from the package. Deleting it left one rule and no machinery.
+        </p>
+      </div>
 
       <h4>2.2 &nbsp;The seam the adapters see</h4>
 
@@ -831,7 +833,7 @@ def __getattr__(name: str) -&gt; Any:
                                │ batch ≤ 1000 records
                                ▼
         ┌────────────────────────────────────────────┐  _transport.py
-        │  transport       JSON → zstd/gzip → POST   │
+        │  transport       JSON → zstd → POST        │
         └──────────────────────┬─────────────────────┘
                                ▼
               POST /v1/ocpi · POST /v1/ocpp            ingestion API</pre>
@@ -1274,7 +1276,7 @@ while len(self._buffer) &gt; 0:
                │
                ▼
              compress      &lt; 1 KiB ──▶ identity, no CPU spent
-               │           zstd if installed, else gzip
+               │           zstd — the only codec
                ▼
              POST /v1/{protocol}
                │           X-API-Key · Content-Type · Content-Encoding
@@ -1319,14 +1321,18 @@ while len(self._buffer) &gt; 0:
 
       <div class="note">
         <p>
-          <b>The codec is chosen, not configured.</b> The ingestion API accepts
-          gzip and zstd. zstd is better on both CPU and ratio, but it is a
-          compiled dependency; gzip is in the standard library. So the SDK uses
-          zstd when <code>zstandard</code> is importable and gzip otherwise,
-          decided once and cached. The Go SDK has no equivalent choice — its
-          zstd implementation is pure Go, so it always has one — and neither
-          exposes a <code>compression</code> field, because a body the server
-          rejects is not a trade-off worth offering.
+          <b>The codec is fixed, not configured.</b> The ingestion API accepts
+          gzip and uncompressed bodies too, and the SDK sends neither: zstd is
+          the codec, and <code>zstandard</code> is the one runtime dependency
+          the SDK carries for it. That is a deliberate cross-SDK decision
+          rather than a Python one — a batch on the wire looks the same
+          whichever language sent it, and the ingestion API's capacity
+          planning holds across all of them. It costs a compiled wheel, which
+          is the trade: the Go SDK's zstd is pure Go, so it pays nothing,
+          while a Python host on a platform with no <code>zstandard</code>
+          wheel would have to build it. No SDK exposes a
+          <code>compression</code> field, because a body the server rejects is
+          not a trade-off worth offering.
         </p>
         <p>
           Each client builds its own <code>OpenerDirector</code> rather than
@@ -1844,7 +1850,7 @@ async def handle_charger(websocket, path):
       <div class="code">
         <div class="cap">direct capture</div>
 <pre><code>panda.capture_inbound_message(
-    identity=evpanda.RoamingIdentity(platform_id="acme", platform_name="Acme Mobility"),
+    identity=evpanda.Platform(id="acme", name="Acme Mobility"),
     data=evpanda.HTTPExchange(
         method="POST",
         url="/ocpi/2.2/cdrs",
@@ -1928,20 +1934,33 @@ async def handle_charger(websocket, path):
         request and the ordering problem disappears.
       </p>
 
+      <p>
+        That is not a hypothetical difference. Mirage, EVPanda's own OCPI
+        simulator, authenticates inside each route handler rather than in a
+        middleware — it resolves the partner from the
+        <code>Authorization</code> header where the handler needs it anyway.
+        Go's adapter could not see an identity resolved that deep; the Python
+        one reads the scope after the response and does.
+      </p>
+
       <div class="code">
-        <div class="cap">inbound — ASGI, with a Starlette-style auth layer</div>
-<pre><code>from evpanda.ocpi import set_identity
+        <div class="cap">inbound — ASGI, with a Starlette auth layer</div>
+<pre><code>from starlette.middleware.base import BaseHTTPMiddleware
+
+from evpanda.ocpi import set_identity
 from evpanda.ocpi.asgi import ASGIMiddleware
 
-@app.middleware("http")
 async def authenticate(request, call_next):
     partner = lookup_partner(request.headers.get("authorization"))
     if partner is None:
         return JSONResponse({"status_code": 2001}, status_code=401)
-    set_identity(request.scope, evpanda.RoamingIdentity(
-        platform_id=partner.id, platform_name=partner.name,
+    set_identity(request.scope, evpanda.Platform(
+        id=partner.id, name=partner.name,
     ))
     return await call_next(request)
+
+app.add_middleware(BaseHTTPMiddleware, dispatch=authenticate)
+<span class="c"># FastAPI keeps the decorator form: @app.middleware("http")</span>
 
 app = ASGIMiddleware(app, panda)</code></pre>
       </div>
@@ -1959,18 +1978,54 @@ app = ASGIMiddleware(app, panda)</code></pre>
 
       <p>
         The <strong>WSGI</strong> middleware does the same job against a
-        synchronous protocol: it tees <code>wsgi.input</code> as your
-        application reads it, wraps <code>start_response</code> for the status
-        and headers, and returns an iterable that records the body as the
-        server iterates it. The tee implements every read path rather
-        than delegating them — Werkzeug, and so Flask, reads bodies through
-        <code>readinto</code>; Django reads through <code>read</code> and
-        <code>readline</code>; others iterate the stream. A wrapper that
-        forwards one of those straight to the underlying stream records an
-        empty body while the host works perfectly, which is the worst shape of
-        bug this SDK can have — so there are tests against the real frameworks
-        and not only against the protocol. Capture completes when the response
-        iterable is closed, exhausted, or abandoned, whichever comes first.
+        synchronous protocol: it takes the request body, wraps
+        <code>start_response</code> for the status and headers, and returns an
+        iterable that records the response as the server writes it. Capture
+        completes when that iterable is closed, exhausted, or abandoned,
+        whichever comes first.
+      </p>
+
+      <p>
+        The request body is where WSGI and ASGI part company, and it is worth
+        the paragraph. ASGI hands the body over as messages, so the middleware
+        wraps <code>receive</code> and sees every byte. WSGI hands over a
+        <em>file object</em>, and Python's file protocol has six read
+        methods — <code>read</code>, <code>read1</code>, <code>readinto</code>,
+        <code>readline</code>, <code>readlines</code> and iteration. The Go
+        SDK tees the equivalent stream, because Go's
+        <code>io.ReadCloser</code> has exactly one method to intercept. A
+        Python tee has to implement all six, and one that forwards a single
+        method untouched records an empty body while the host works
+        perfectly. That is not hypothetical: the first version of this
+        adapter delegated <code>readinto</code>, which is precisely the method
+        Werkzeug uses, so every Flask body arrived empty and every test
+        passed.
+      </p>
+
+      <div class="code">
+        <div class="cap">wsgi.py — what replaced the tee</div>
+<pre><code>length = int(environ.get("CONTENT_LENGTH") or 0)
+if length &gt; max_bytes:
+    body.overflow()          <span class="c"># oversize: drop the exchange, read nothing</span>
+    return
+data = stream.read(length)
+body.push(data)
+environ["wsgi.input"] = io.BytesIO(data)</code></pre>
+      </div>
+
+      <p>
+        Reading the body up front and handing the application a
+        <code>BytesIO</code> of it removes the whole class of bug, because
+        <code>BytesIO</code> <em>is</em> the standard library's implementation
+        of that protocol — there is nothing left to get wrong. The read is
+        bounded before it happens by <code>Content-Length</code>, so an
+        oversize body is never pulled into memory; it is marked oversize,
+        which drops the exchange exactly as it does everywhere else. Two
+        consequences, both deliberate: a body the application never reads is
+        recorded anyway (which is the exchange you most want when a handler
+        rejects a request without parsing it), and a chunked request — no
+        <code>Content-Length</code>, which no OCPI client sends — is passed
+        through untouched and captured without a body.
       </p>
 
       <p>
@@ -2007,10 +2062,15 @@ from evpanda.ocpi import HTTPXTransport, use_identity
 
 client = httpx.Client(transport=HTTPXTransport(panda))
 
+<span class="c"># A client that sets verify, cert, limits, proxy or http2 must pass those
+# on a base transport — httpx applies them only when it builds its own,
+# so supplying `transport=` silently drops them:
+#     base = httpx.HTTPTransport(verify=ctx)
+#     client = httpx.Client(transport=HTTPXTransport(panda, base))</span>
+
 <span class="c"># You already looked the partner up to get their Token B —
 # scope the identity to the same block.</span>
-with use_identity(evpanda.RoamingIdentity(platform_id=partner.id,
-                                          platform_name=partner.name)):
+with use_identity(evpanda.Platform(id=partner.id, name=partner.name)):
     response = client.post(
         f"{partner.base_url}/ocpi/2.2/sessions",
         json=payload,
@@ -2059,6 +2119,34 @@ with use_identity(partner_identity):
         <code>tenant_name</code> stay internal. Stripping happens even on a
         closed client, so closing mid-flight cannot start leaking them.
       </p>
+
+      <h4>15.1 &nbsp;What the adapters cost in memory</h4>
+
+      <p>
+        <code>max_buffer_bytes</code> is the ceiling on everything awaiting
+        delivery, and §6 is about holding it. The adapters sit outside it: while
+        a request is in flight they hold a copy of its bodies, bounded per
+        request by <code>max_capture_bytes</code> and released the moment the
+        exchange is captured. The cost scales with concurrency rather than with
+        the buffer, and with the bodies that actually pass rather than with the
+        cap — ordinary OCPI traffic barely registers, and a server taking large
+        CDR pushes at high concurrency should count on roughly one extra copy
+        of each in-flight body. Capturing by hand instead of through an adapter
+        avoids it entirely, since the caller already holds the bytes.
+      </p>
+
+      <div class="note">
+        <p>
+          <b>Why it is not folded into the ceiling.</b> A shared budget across
+          in-flight requests is only enforceable one way: when it is exhausted,
+          something has to wait for it. That is a request waiting on the
+          telemetry SDK, which Invariant&nbsp;1 forbids outright. The bound
+          that <em>is</em> available — per request, before the body is read —
+          is the one the adapters apply, and it is why the WSGI adapter checks
+          <code>Content-Length</code> before it reads a byte rather than
+          discovering the size afterwards.
+        </p>
+      </div>
     </section>
 
     <section id="s16">
@@ -2151,11 +2239,11 @@ with use_identity(partner_identity):
         <div class="cap">a path-prefix resolver</div>
 <pre><code>from evpanda.ocpi import RequestInfo
 
-def by_path(info: RequestInfo) -&gt; evpanda.RoamingIdentity | None:
+def by_path(info: RequestInfo) -&gt; evpanda.Platform | None:
     if not info.url.startswith("/partners/"):
         return None                       <span class="c"># not captured</span>
     name = info.url.removeprefix("/partners/").split("/")[0]
-    return evpanda.RoamingIdentity(platform_id=name, platform_name=name)
+    return evpanda.Platform(id=name, name=name)
 
 ASGIMiddleware(app, panda, resolver=by_path)
 HTTPXTransport(panda, resolver=by_path)</code></pre>
@@ -2205,14 +2293,15 @@ HTTPXTransport(panda, resolver=by_path)</code></pre>
             <tr><td>Delivery loop</td><td><code>select</code> on four channels</td><td>One <code>Event</code>, one timeout — also no polling</td></tr>
             <tr><td>Flush serialization</td><td>Structural: one goroutine</td><td>An <code>RLock</code> the worker and callers share</td></tr>
             <tr><td>Deadline enforcement</td><td>Cancel the request context</td><td>The deadline is passed into the transport (§7.2)</td></tr>
-            <tr><td>Codec</td><td>zstd, always (pure-Go dependency)</td><td>zstd when installed, else gzip — no required dependency</td></tr>
+            <tr><td>Codec</td><td>zstd, always (pure-Go dependency)</td><td>zstd, always (a compiled wheel — the one runtime dependency)</td></tr>
             <tr><td>HTTP client</td><td><code>net/http</code>, keep-alive</td><td><code>urllib.request</code>, proxy-aware, a connection per batch</td></tr>
             <tr><td>Inbound adapter</td><td>One: <code>net/http</code> middleware</td><td>Two: WSGI and ASGI</td></tr>
             <tr><td>Outbound adapter</td><td>One: <code>http.RoundTripper</code></td><td>Two: httpx (sync + async) and requests</td></tr>
             <tr><td>Identity carrier</td><td><code>context.Context</code>, then headers</td><td>Request mapping, then ContextVar, then headers (§16)</td></tr>
             <tr><td>Mount order</td><td>Middleware must sit after auth</td><td>Irrelevant — the mapping is read at the end</td></tr>
             <tr><td>Resolver input</td><td><code>*http.Request</code></td><td><code>RequestInfo</code> — four layers, no shared request type</td></tr>
-            <tr><td>Adapter packaging</td><td>Subpackage; a third-party one gets its own module</td><td>Subpackage; third-party ones are lazy imports behind extras</td></tr>
+            <tr><td>Adapter packaging</td><td>Subpackage; a third-party one gets its own module</td><td>Subpackage; one module per adapter, third-party ones behind extras</td></tr>
+            <tr><td>Inbound request body</td><td>Tee over <code>r.Body</code> — one method to intercept</td><td>ASGI tees <code>receive</code>; WSGI reads it up front (§15)</td></tr>
             <tr><td>Fault counter</td><td><code>DroppedPanic</code></td><td><code>dropped_fault</code> — Python has exceptions, not panics</td></tr>
             <tr><td>Process lifecycle</td><td>—</td><td><code>atexit</code> drain and after-fork restart (§11.1)</td></tr>
           </tbody>
@@ -2229,11 +2318,10 @@ HTTPXTransport(panda, resolver=by_path)</code></pre>
       </p>
 
       <p>
-        Two rows are worth flagging for anyone running both SDKs against the
-        same ingestion API, because they are observable rather than internal:
-        the Python SDK may send <code>Content-Encoding: gzip</code> where Go
-        always sends <code>zstd</code>, and a Python client opens a connection
-        per batch where Go reuses one. Neither changes a record.
+        One row is worth flagging for anyone running both SDKs against the
+        same ingestion API, because it is observable rather than internal: a
+        Python client opens a connection per batch where Go reuses one. The
+        bodies are identical — both send zstd, by design.
       </p>
     </section>
 
@@ -2262,6 +2350,15 @@ HTTPXTransport(panda, resolver=by_path)</code></pre>
           contract, which is private API in practice. httpx, WSGI and ASGI all
           tee properly; requests is the one place a body can go unrecorded, and
           the record still carries the method, URL, status and headers.
+        </li>
+        <li>
+          <strong>A chunked WSGI request is captured without its body.</strong>
+          The bounded read needs a <code>Content-Length</code> to be bounded
+          by. No OCPI client sends chunked — httpx, requests and Go's
+          <code>http.Client</code> all set the header for a JSON body — and
+          the alternative is re-introducing the six-method tee that §15
+          describes. The record still carries the method, URL, status and
+          headers.
         </li>
         <li>
           <strong>OCPP redaction is a seam, not a feature.</strong> Frames are

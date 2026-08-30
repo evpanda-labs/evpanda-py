@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import base64
-import gzip
 import json
 import time
 from typing import Any
 
 import pytest
+import zstandard
 
 import evpanda
 from conftest import IngestServer
@@ -26,15 +26,15 @@ from evpanda._transport import (
     serialize,
 )
 from evpanda._types import (
-    ChargerIdentity,
+    Charger,
     HTTPExchange,
     OCPIDirection,
     OCPIMessage,
     OCPPDirection,
     OCPPEventType,
     OCPPMessage,
+    Platform,
     Protocol,
-    RoamingIdentity,
 )
 
 STAMP = "2026-05-18T12:34:56.789Z"
@@ -54,9 +54,9 @@ def ocpi_envelope(**overrides: Any) -> BufferedMessage:
         captured_at=STAMP,
         message=OCPIMessage(
             direction=OCPIDirection.IN,
-            identity=RoamingIdentity(
-                platform_id="acme",
-                platform_name="Acme",
+            identity=Platform(
+                id="acme",
+                name="Acme",
                 tenant_id="t-1",
                 tenant_name="Tenant",
             ),
@@ -68,7 +68,7 @@ def ocpi_envelope(**overrides: Any) -> BufferedMessage:
 def ocpp_envelope(**overrides: Any) -> BufferedMessage:
     fields: dict[str, Any] = {
         "event_type": OCPPEventType.MESSAGE,
-        "identity": ChargerIdentity(charger_id="CP-001"),
+        "identity": Charger(id="CP-001"),
         "connection_id": "conn-1",
         "direction": OCPPDirection.FROM_CP,
         "payload": b'[2,"1","Heartbeat",{}]',
@@ -145,17 +145,12 @@ def test_small_payloads_are_not_compressed() -> None:
     assert compress(raw) == (raw, "identity")
 
 
-def test_large_payloads_are_compressed() -> None:
+def test_large_payloads_are_zstd_compressed() -> None:
     raw = b'{"messages":[]}' * 500
     body, encoding = compress(raw)
-    assert encoding in ("zstd", "gzip")
+    assert encoding == "zstd"
     assert len(body) < len(raw)
-    if encoding == "gzip":
-        assert gzip.decompress(body) == raw
-    else:
-        import zstandard
-
-        assert zstandard.decompress(body) == raw
+    assert zstandard.decompress(body) == raw
 
 
 def test_backoff_stays_inside_its_bounds() -> None:
