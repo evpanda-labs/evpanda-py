@@ -95,11 +95,7 @@ class Platform:
         ``id`` and ``name`` present, and the tenant pair all-or-nothing.
         The SDK silently drops messages that fail it.
         """
-        return (
-            _is_non_empty(self.id)
-            and _is_non_empty(self.name)
-            and _is_tenant_pair_valid(self.tenant_id, self.tenant_name)
-        )
+        return valid_platform(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +114,32 @@ class Charger:
     def valid(self) -> bool:
         """Whether this charger can attribute a message."""
         return _is_non_empty(self.id) and _is_tenant_pair_valid(self.tenant_id, self.tenant_name)
+
+
+def valid_platform(platform: object) -> bool:
+    """Whether ``platform`` can attribute an OCPI message.
+
+    It takes ``object`` rather than ``Platform`` on purpose. Type hints are
+    not enforced at runtime, so a host can hand us ``None`` — and a message
+    the SDK cannot attribute is an invalid identity, not a bug in the SDK.
+    Checking the type here is what keeps that drop in the right counter,
+    and matches what the Go and Node SDKs do.
+    """
+    return (
+        isinstance(platform, Platform)
+        and _is_non_empty(platform.id)
+        and _is_non_empty(platform.name)
+        and _is_tenant_pair_valid(platform.tenant_id, platform.tenant_name)
+    )
+
+
+def valid_charger(charger: object) -> bool:
+    """Whether ``charger`` can attribute an OCPP message. See :func:`valid_platform`."""
+    return (
+        isinstance(charger, Charger)
+        and _is_non_empty(charger.id)
+        and _is_tenant_pair_valid(charger.tenant_id, charger.tenant_name)
+    )
 
 
 # ── Captured data ────────────────────────────────────────────────────────

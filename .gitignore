@@ -23,3 +23,7 @@ build/
 .claude/
 .idea/
 .vscode/
+
+# Design notes live in the Obsidian vault, not the package. They are
+# ~100 KB of HTML that no consumer of this library needs.
+docs/

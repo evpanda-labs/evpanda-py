@@ -92,6 +92,20 @@ def test_prepare_ocpi_drops_an_oversize_body() -> None:
         assert reason is DropReason.OVERSIZE
 
 
+def test_an_absent_identity_is_invalid_not_a_fault() -> None:
+    """Type hints are not enforced at runtime. A host that passes None has
+    given us a message we cannot attribute — that is an invalid identity,
+    not a bug in the SDK, and it must not land in the fault counter.
+    """
+    message = ocpi()
+    message.identity = None  # type: ignore[assignment]
+    assert prepare_ocpi(message, None, CAP) == (None, DropReason.INVALID_IDENTITY)
+
+    frame = ocpp()
+    frame.identity = None  # type: ignore[assignment]
+    assert prepare_ocpp(frame, None, CAP) == (None, DropReason.INVALID_IDENTITY)
+
+
 def test_a_tenant_pair_is_all_or_nothing() -> None:
     both = Platform(id="acme", name="Acme", tenant_id="t", tenant_name="T")
     assert both.valid()
@@ -275,7 +289,7 @@ def test_health_is_reported_once_per_window(logs: pytest.LogCaptureFixture) -> N
     worker._report_health()
     assert len(logs.records) == 1
     assert "captures dropped" in logs.records[0].getMessage()
-    assert "dropped_evicted=4" in logs.records[0].getMessage()
+    assert "evicted=4" in logs.records[0].getMessage()
 
     worker._report_health()  # the window's damage was already reported
     assert len(logs.records) == 1

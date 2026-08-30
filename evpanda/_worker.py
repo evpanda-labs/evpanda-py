@@ -28,6 +28,8 @@ from ._types import (
     OCPPEventType,
     OCPPMessage,
     coerce_body,
+    valid_charger,
+    valid_platform,
 )
 
 #: The ingestion API's per-request maximum and, equally, the size-based
@@ -287,7 +289,7 @@ def prepare_ocpi(
     An oversize body on either side drops the whole message — half a body
     is broken JSON, and it would defeat the credentials redactor.
     """
-    if not message.identity.valid():
+    if not valid_platform(message.identity):
         return None, DropReason.INVALID_IDENTITY
 
     source = message.data
@@ -323,7 +325,7 @@ def prepare_ocpp(
     A message event with no frame or no direction is dropped: the ingestion
     contract requires both on ``event_type`` 2.
     """
-    if not message.identity.valid():
+    if not valid_charger(message.identity):
         return None, DropReason.INVALID_IDENTITY
 
     payload = coerce_body(message.payload)
