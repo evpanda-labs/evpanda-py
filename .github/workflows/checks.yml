@@ -2,6 +2,14 @@
 # pull requests) and release.yml (tags). Keeping it in one place is the
 # point: a release must clear exactly the same bar as a pull request, and
 # two copies of these steps would eventually disagree.
+#
+# Three jobs, the same three in all three EVPanda SDKs:
+#   lint     — once, since it does not vary by interpreter version
+#   test     — across every supported interpreter
+#   package  — prove what ships actually works, from outside this repo
+#
+# Plus one this SDK alone needs: `bare`, which proves the optional extras
+# really are optional.
 name: Checks
 
 on:
@@ -11,6 +19,24 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - run: pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format
+        run: ruff format --check .
+
   test:
     name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
@@ -28,14 +54,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install
-        run: pip install -e ".[dev]"
-
-      - name: Ruff lint
-        run: ruff check .
-
-      - name: Ruff format
-        run: ruff format --check .
+      - run: pip install -e ".[dev]"
 
       - name: Mypy
         run: mypy
@@ -43,9 +62,6 @@ jobs:
       - name: Pytest
         run: pytest
 
-  # The adapter extras are optional, so prove the SDK works without them:
-  # an import of evpanda must not need httpx or requests, and everything
-  # but their two suites must pass on a plain `pip install evpanda`.
   bare:
     name: Test without the adapter extras
     runs-on: ubuntu-latest
@@ -56,6 +72,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      # The adapter extras are optional, so prove the SDK works without
+      # them: an import of evpanda must not need httpx or requests, and
+      # everything but their two suites must pass on a plain install.
       - name: Install the package and the test runner only
         run: pip install -e . pytest
 
@@ -67,8 +86,6 @@ jobs:
       - name: Pytest
         run: pytest
 
-  # The repo publishes to PyPI — prove the sdist/wheel build and their
-  # metadata on every push, not just at release time.
   package:
     name: Package
     runs-on: ubuntu-latest
@@ -89,9 +106,9 @@ jobs:
         run: twine check --strict dist/*
 
       # The package sits at the repo root, so a test run imports the working
-      # tree whether or not the wheel is complete. Installing the built wheel
-      # and importing it from somewhere else is what proves a module, or
-      # py.typed, did not fall out of the build.
+      # tree whether or not the wheel is complete. Installing the built
+      # wheel and importing it from somewhere else is what proves a module,
+      # or py.typed, did not fall out of the build.
       - name: Import the built wheel, away from the source tree
         run: |
           set -euo pipefail

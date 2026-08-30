@@ -1,5 +1,6 @@
-# Publishes evpanda to PyPI when a semver tag is pushed, and cuts the
-# matching GitHub Release.
+# Cuts a release when a semver tag is pushed.
+#
+# Publishes evpanda to PyPI, then cuts the matching GitHub Release.
 #
 # To release:
 #   1. bump __version__ in evpanda/__init__.py, and merge it
@@ -17,6 +18,9 @@
 #     Environments); optionally add required reviewers as a publish gate.
 #
 # Publishing uses OIDC (id-token: write) — no API token to store or rotate.
+#
+# The four jobs are the same four in all three EVPanda SDKs:
+#   validate-tag → checks → publish → github-release
 name: Release
 
 on:
@@ -35,7 +39,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Check the tag is a PEP 440 / semver version
+      - name: Check the tag is a valid version
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -46,7 +50,7 @@ jobs:
           fi
           echo "$TAG is a valid version tag"
 
-      - name: Check the tag matches __version__
+      - name: Check the tag matches the version in the tree
         env:
           TAG: ${{ github.ref_name }}
         run: |
