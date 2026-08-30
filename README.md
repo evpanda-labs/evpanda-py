@@ -59,7 +59,8 @@ if panda.error:
     log.warning("%s (running inert)", panda.error)
 
 async def handle_charger(websocket):
-    identity = resolve_charger_identity(websocket)  # however your CSMS does it
+    # However your CSMS identifies a charge point at handshake time.
+    identity = resolve_charger_identity(websocket)  # -> evpanda.Charger(id="CP-001")
     if identity is None:
         await websocket.close(code=1008)
         return
@@ -124,9 +125,8 @@ returns.
 ## HTTP adapters
 
 `evpanda.ocpi` wraps the HTTP layers your service already speaks, so you don't
-have to assemble exchanges yourself. Four adapters, one per layer:
-
-Each lives in the module named after what it wraps:
+have to assemble exchanges yourself. Four adapters, one per layer, each in the
+module named after what it wraps:
 
 | Adapter | Direction | For |
 |---|---|---|
