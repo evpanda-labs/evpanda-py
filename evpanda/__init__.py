@@ -101,7 +101,7 @@ from ._types import (
     Platform,
 )
 
-__version__ = "0.2.0rc1"
+__version__ = "0.2.0"
 
 __all__ = [
     "API_KEY_ENV_VAR",
