@@ -26,7 +26,7 @@ from evpanda.ocpi.requests_adapter import (  # noqa: E402
     instrument_session,
 )
 
-PARTNER = evpanda.RoamingIdentity(platform_id="acme", platform_name="Acme Mobility")
+PARTNER = evpanda.Platform(id="acme", name="Acme Mobility")
 URL = "https://partner.example/ocpi/2.2/sessions"
 
 
@@ -207,15 +207,15 @@ def test_a_closed_client_still_strips_the_headers() -> None:
 def test_a_custom_resolver_replaces_the_default() -> None:
     client = FakeCapturer()
 
-    def by_host(info: RequestInfo) -> evpanda.RoamingIdentity | None:
+    def by_host(info: RequestInfo) -> evpanda.Platform | None:
         host = httpx.URL(info.url).host
-        return evpanda.RoamingIdentity(platform_id=host, platform_name=host)
+        return evpanda.Platform(id=host, name=host)
 
     transport = HTTPXTransport(client, mock_transport([]), resolver=by_host)
     with httpx.Client(transport=transport) as http:
         http.get(URL)
 
-    assert client.outbound[0][0].platform_id == "partner.example"
+    assert client.outbound[0][0].id == "partner.example"
 
 
 # ── httpx, asynchronous ──────────────────────────────────────────────────

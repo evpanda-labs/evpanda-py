@@ -20,7 +20,7 @@ except ImportError as exc:  # pragma: no cover - exercised by the bare install
         "evpanda.ocpi.requests_adapter needs `requests` — pip install 'evpanda[requests]'"
     ) from exc
 
-from .._types import RoamingIdentity
+from .._types import Platform
 from ._adapter import (
     IDENTITY_HEADERS,
     CappedBody,
@@ -108,7 +108,7 @@ class RequestsAdapter(HTTPAdapter):
 
     def _capture(
         self,
-        identity: RoamingIdentity,
+        identity: Platform,
         exchange: Exchange,
         response: requests.Response,
         stream: bool,

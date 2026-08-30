@@ -24,7 +24,7 @@ except ImportError as exc:  # pragma: no cover - exercised by the bare install
         "evpanda.ocpi.httpx_transport needs `httpx` — pip install 'evpanda[httpx]'"
     ) from exc
 
-from .._types import RoamingIdentity
+from .._types import Platform
 from ._adapter import (
     IDENTITY_HEADERS,
     IDENTITY_KEY,
@@ -142,7 +142,7 @@ class AsyncHTTPXTransport(httpx.AsyncBaseTransport):
 
 def _prepare(
     client: Capturer, resolver: Resolver | None, request: httpx.Request
-) -> tuple[RoamingIdentity, Exchange] | None:
+) -> tuple[Platform, Exchange] | None:
     """Resolve the partner, strip the identity headers, start recording.
 
     Returns None when the call is not being captured — an inert or closed
@@ -186,7 +186,7 @@ def _prepare(
 
 def _attach(
     client: Capturer,
-    prepared: tuple[RoamingIdentity, Exchange],
+    prepared: tuple[Platform, Exchange],
     response: httpx.Response,
 ) -> None:
     """Record the response head, and arrange for the exchange to ship."""
@@ -203,10 +203,10 @@ def _attach(
         response.stream = _TeeStream(response.stream, exchange.response_body, finish)
 
 
-def _identity_extension(request: httpx.Request) -> RoamingIdentity | None:
+def _identity_extension(request: httpx.Request) -> Platform | None:
     """The identity carried on the request's ``extensions``, if any."""
     value = request.extensions.get(IDENTITY_KEY)
-    return value if isinstance(value, RoamingIdentity) else None
+    return value if isinstance(value, Platform) else None
 
 
 def _content_or_none(message: httpx.Request | httpx.Response) -> bytes | None:

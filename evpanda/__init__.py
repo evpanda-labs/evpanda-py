@@ -31,7 +31,7 @@ For OCPP, prefer the session handle returned by
 :meth:`OCPPClient.connection`: it mints the connection ID and carries the
 identity, so per-frame calls carry neither::
 
-    with panda.connection(evpanda.ChargerIdentity(charger_id="CP-001")) as session:
+    with panda.connection(evpanda.Charger(id="CP-001")) as session:
         session.message(frame, evpanda.OCPPDirection.FROM_CP)
 
 OCPI adapters
@@ -95,10 +95,10 @@ from ._config import (
 )
 from ._stats import Stats
 from ._types import (
-    ChargerIdentity,
+    Charger,
     HTTPExchange,
     OCPPDirection,
-    RoamingIdentity,
+    Platform,
 )
 
 __version__ = "0.2.0"
@@ -109,7 +109,7 @@ __all__ = [
     "LOG_MODE_ENV_VAR",
     "APIKeyError",
     "BaseConfig",
-    "ChargerIdentity",
+    "Charger",
     "ConfigError",
     "EVPandaError",
     "EndpointError",
@@ -121,7 +121,7 @@ __all__ = [
     "OCPPConfig",
     "OCPPDirection",
     "OCPPSession",
-    "RoamingIdentity",
+    "Platform",
     "Stats",
     "__version__",
     "start_ocpi",

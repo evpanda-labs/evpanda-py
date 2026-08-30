@@ -72,51 +72,52 @@ def _is_tenant_pair_valid(tenant_id: object, tenant_name: object) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
-class RoamingIdentity:
-    """The OCPI roaming context for a message.
+class Platform:
+    """The roaming partner an OCPI message was exchanged with.
 
-    ``platform_id`` and ``platform_name`` are required; ``tenant_id`` and
-    ``tenant_name`` are optional but all-or-nothing (supply both or
-    neither).
+    It is always the partner on the other side — never your own platform.
 
-    It is always the **partner on the other side** of the exchange, never
-    your own platform.
+    ``id`` and ``name`` are required. ``tenant_id`` and ``tenant_name``
+    describe a different subject: which of *your* tenants the exchange
+    belongs to, which is why they keep the prefix the platform's own
+    fields do not need. They are optional but all-or-nothing — supply both
+    or neither.
     """
 
-    platform_id: str
-    platform_name: str
+    id: str
+    name: str
     tenant_id: str | None = None
     tenant_name: str | None = None
 
     def valid(self) -> bool:
-        """Whether this identity can attribute a message.
+        """Whether this platform can attribute a message.
 
+        ``id`` and ``name`` present, and the tenant pair all-or-nothing.
         The SDK silently drops messages that fail it.
         """
         return (
-            _is_non_empty(self.platform_id)
-            and _is_non_empty(self.platform_name)
+            _is_non_empty(self.id)
+            and _is_non_empty(self.name)
             and _is_tenant_pair_valid(self.tenant_id, self.tenant_name)
         )
 
 
 @dataclass(frozen=True, slots=True)
-class ChargerIdentity:
-    """The OCPP charger context for a message.
+class Charger:
+    """The charge point an OCPP event belongs to.
 
-    ``charger_id`` is required; ``tenant_id`` and ``tenant_name`` are
-    optional but all-or-nothing.
+    ``id`` is required. ``tenant_id`` and ``tenant_name`` say which of
+    your tenants the charger belongs to; they are optional but
+    all-or-nothing.
     """
 
-    charger_id: str
+    id: str
     tenant_id: str | None = None
     tenant_name: str | None = None
 
     def valid(self) -> bool:
-        """Whether this identity can attribute a message."""
-        return _is_non_empty(self.charger_id) and _is_tenant_pair_valid(
-            self.tenant_id, self.tenant_name
-        )
+        """Whether this charger can attribute a message."""
+        return _is_non_empty(self.id) and _is_tenant_pair_valid(self.tenant_id, self.tenant_name)
 
 
 # ── Captured data ────────────────────────────────────────────────────────
@@ -193,7 +194,7 @@ class OCPIMessage:
     """The internal buffered form of an OCPI capture."""
 
     direction: OCPIDirection
-    identity: RoamingIdentity
+    identity: Platform
     data: HTTPExchange
 
     def size(self) -> int:
@@ -202,8 +203,8 @@ class OCPIMessage:
         return (
             _ENVELOPE_OVERHEAD
             + len(self.direction)
-            + len(self.identity.platform_id)
-            + len(self.identity.platform_name)
+            + len(self.identity.id)
+            + len(self.identity.name)
             + len(self.identity.tenant_id or "")
             + len(self.identity.tenant_name or "")
             + len(d.method)
@@ -223,7 +224,7 @@ class OCPPMessage:
     """
 
     event_type: OCPPEventType
-    identity: ChargerIdentity
+    identity: Charger
     connection_id: str
     direction: OCPPDirection | None = None
     payload: BodyInput | None = None
@@ -232,7 +233,7 @@ class OCPPMessage:
         """The accounted footprint of this capture, in bytes."""
         return (
             _ENVELOPE_OVERHEAD
-            + len(self.identity.charger_id)
+            + len(self.identity.id)
             + len(self.identity.tenant_id or "")
             + len(self.identity.tenant_name or "")
             + len(self.connection_id)

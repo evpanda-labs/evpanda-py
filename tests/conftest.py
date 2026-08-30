@@ -238,8 +238,8 @@ def partner() -> Iterator[PartnerServer]:
         thread.join(timeout=5)
 
 
-PARTNER = evpanda.RoamingIdentity(platform_id="acme", platform_name="Acme Mobility")
-CHARGER = evpanda.ChargerIdentity(charger_id="CP-001")
+PARTNER = evpanda.Platform(id="acme", name="Acme Mobility")
+CHARGER = evpanda.Charger(id="CP-001")
 
 
 def exchange(**overrides: Any) -> evpanda.HTTPExchange:

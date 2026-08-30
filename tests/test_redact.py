@@ -12,9 +12,9 @@ from evpanda._redact import (
     make_ocpi_redactor,
     mask_credentials_token,
 )
-from evpanda._types import HTTPExchange, OCPIDirection, OCPIMessage, RoamingIdentity
+from evpanda._types import HTTPExchange, OCPIDirection, OCPIMessage, Platform
 
-PARTNER = RoamingIdentity(platform_id="acme", platform_name="Acme")
+PARTNER = Platform(id="acme", name="Acme")
 
 
 def redact_headers(headers: dict[str, str], allowed: tuple[str, ...] = ()) -> dict[str, str]:

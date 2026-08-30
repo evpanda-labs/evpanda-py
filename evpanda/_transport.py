@@ -157,8 +157,8 @@ def record(envelope: BufferedMessage) -> OCPIIngest | OCPPIngest:
         data = message.data
         return OCPIIngest(
             captured_at=envelope.captured_at,
-            platform_id=message.identity.platform_id,
-            platform_name=message.identity.platform_name,
+            platform_id=message.identity.id,
+            platform_name=message.identity.name,
             tenant_id=_opt_str(message.identity.tenant_id),
             tenant_name=_opt_str(message.identity.tenant_name),
             direction=str(message.direction),
@@ -171,7 +171,7 @@ def record(envelope: BufferedMessage) -> OCPIIngest | OCPPIngest:
             response_body=_body_b64(coerce_body(data.response_body)),
         )
     return OCPPIngest(
-        charger_id=message.identity.charger_id,
+        charger_id=message.identity.id,
         connection_id=message.connection_id,
         tenant_id=_opt_str(message.identity.tenant_id),
         tenant_name=_opt_str(message.identity.tenant_name),

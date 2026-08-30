@@ -14,7 +14,7 @@ from conftest import FakeCapturer
 from evpanda.ocpi import RequestInfo, set_identity, use_identity
 from evpanda.ocpi.wsgi import WSGIMiddleware
 
-PARTNER = evpanda.RoamingIdentity(platform_id="acme", platform_name="Acme Mobility")
+PARTNER = evpanda.Platform(id="acme", name="Acme Mobility")
 
 
 def environ_for(body: bytes = b"", **overrides: Any) -> dict[str, Any]:
@@ -146,23 +146,23 @@ def test_a_half_set_tenant_pair_is_not_captured() -> None:
 def test_a_custom_resolver_replaces_the_default() -> None:
     client = FakeCapturer()
 
-    def by_path(info: RequestInfo) -> evpanda.RoamingIdentity | None:
+    def by_path(info: RequestInfo) -> evpanda.Platform | None:
         name = info.url.removeprefix("/partners/").split("/")[0]
         if not name or not info.url.startswith("/partners/"):
             return None
-        return evpanda.RoamingIdentity(platform_id=name, platform_name=name)
+        return evpanda.Platform(id=name, name=name)
 
     app = WSGIMiddleware(echo_app(), client, resolver=by_path)
     run(app, environ_for(PATH_INFO="/partners/acme/cdrs", QUERY_STRING=""))
     run(app, environ_for(PATH_INFO="/health", QUERY_STRING=""))
 
-    assert [identity.platform_id for identity, _ in client.inbound] == ["acme"]
+    assert [identity.id for identity, _ in client.inbound] == ["acme"]
 
 
 def test_a_broken_resolver_only_costs_the_capture() -> None:
     client = FakeCapturer()
 
-    def explode(info: RequestInfo) -> evpanda.RoamingIdentity:
+    def explode(info: RequestInfo) -> evpanda.Platform:
         raise RuntimeError("boom")
 
     status, _ = run(WSGIMiddleware(echo_app(), client, resolver=explode), environ_for())

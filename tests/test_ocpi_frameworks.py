@@ -21,7 +21,7 @@ from evpanda.ocpi.wsgi import WSGIMiddleware
 from test_ocpi_asgi import run as run_asgi
 from test_ocpi_asgi import scope_for
 
-PARTNER = evpanda.RoamingIdentity(platform_id="acme", platform_name="Acme Mobility")
+PARTNER = evpanda.Platform(id="acme", name="Acme Mobility")
 
 
 def test_flask_bodies_are_captured_in_both_directions() -> None:

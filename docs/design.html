@@ -535,7 +535,9 @@
         <p><b>Memory is bounded, and the bound is a number you provision
         against.</b> <code>max_buffer_bytes</code> is the ceiling on everything
         held awaiting delivery — 32&nbsp;MiB by default, allocated on demand.
-        Under stress the SDK evicts rather than accumulating.</p>
+        Under stress the SDK evicts rather than accumulating. The adapters add
+        a second cost outside that ceiling, one bounded copy per in-flight
+        request; §15 says why it is not folded in.</p>
       </div>
 
       <div class="rule-box">
@@ -1848,7 +1850,7 @@ async def handle_charger(websocket, path):
       <div class="code">
         <div class="cap">direct capture</div>
 <pre><code>panda.capture_inbound_message(
-    identity=evpanda.RoamingIdentity(platform_id="acme", platform_name="Acme Mobility"),
+    identity=evpanda.Platform(id="acme", name="Acme Mobility"),
     data=evpanda.HTTPExchange(
         method="POST",
         url="/ocpi/2.2/cdrs",
@@ -1952,8 +1954,8 @@ async def authenticate(request, call_next):
     partner = lookup_partner(request.headers.get("authorization"))
     if partner is None:
         return JSONResponse({"status_code": 2001}, status_code=401)
-    set_identity(request.scope, evpanda.RoamingIdentity(
-        platform_id=partner.id, platform_name=partner.name,
+    set_identity(request.scope, evpanda.Platform(
+        id=partner.id, name=partner.name,
     ))
     return await call_next(request)
 
@@ -2068,8 +2070,7 @@ client = httpx.Client(transport=HTTPXTransport(panda))
 
 <span class="c"># You already looked the partner up to get their Token B —
 # scope the identity to the same block.</span>
-with use_identity(evpanda.RoamingIdentity(platform_id=partner.id,
-                                          platform_name=partner.name)):
+with use_identity(evpanda.Platform(id=partner.id, name=partner.name)):
     response = client.post(
         f"{partner.base_url}/ocpi/2.2/sessions",
         json=payload,
@@ -2118,6 +2119,34 @@ with use_identity(partner_identity):
         <code>tenant_name</code> stay internal. Stripping happens even on a
         closed client, so closing mid-flight cannot start leaking them.
       </p>
+
+      <h4>15.1 &nbsp;What the adapters cost in memory</h4>
+
+      <p>
+        <code>max_buffer_bytes</code> is the ceiling on everything awaiting
+        delivery, and §6 is about holding it. The adapters sit outside it: while
+        a request is in flight they hold a copy of its bodies, bounded per
+        request by <code>max_capture_bytes</code> and released the moment the
+        exchange is captured. The cost scales with concurrency rather than with
+        the buffer, and with the bodies that actually pass rather than with the
+        cap — ordinary OCPI traffic barely registers, and a server taking large
+        CDR pushes at high concurrency should count on roughly one extra copy
+        of each in-flight body. Capturing by hand instead of through an adapter
+        avoids it entirely, since the caller already holds the bytes.
+      </p>
+
+      <div class="note">
+        <p>
+          <b>Why it is not folded into the ceiling.</b> A shared budget across
+          in-flight requests is only enforceable one way: when it is exhausted,
+          something has to wait for it. That is a request waiting on the
+          telemetry SDK, which Invariant&nbsp;1 forbids outright. The bound
+          that <em>is</em> available — per request, before the body is read —
+          is the one the adapters apply, and it is why the WSGI adapter checks
+          <code>Content-Length</code> before it reads a byte rather than
+          discovering the size afterwards.
+        </p>
+      </div>
     </section>
 
     <section id="s16">
@@ -2210,11 +2239,11 @@ with use_identity(partner_identity):
         <div class="cap">a path-prefix resolver</div>
 <pre><code>from evpanda.ocpi import RequestInfo
 
-def by_path(info: RequestInfo) -&gt; evpanda.RoamingIdentity | None:
+def by_path(info: RequestInfo) -&gt; evpanda.Platform | None:
     if not info.url.startswith("/partners/"):
         return None                       <span class="c"># not captured</span>
     name = info.url.removeprefix("/partners/").split("/")[0]
-    return evpanda.RoamingIdentity(platform_id=name, platform_name=name)
+    return evpanda.Platform(id=name, name=name)
 
 ASGIMiddleware(app, panda, resolver=by_path)
 HTTPXTransport(panda, resolver=by_path)</code></pre>
