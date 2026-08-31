@@ -26,6 +26,7 @@ class DropReason(Enum):
 
     NONE = "none"
     INVALID_IDENTITY = "invalid_identity"
+    INVALID_BODY = "invalid_body"
     OVERSIZE = "oversize"
     EVICTED = "evicted"
     UNDELIVERABLE = "undeliverable"
@@ -50,8 +51,8 @@ class Stats:
     ``dropped_evicted`` high    upstream can't keep up, or the buffer is
                                 undersized for the traffic
     ``dropped_undeliverable``   network, API key, or ingestion fault
+    ``dropped_invalid_body``    a body or frame that was not valid UTF-8
     ``dropped_fault`` > 0       a bug in the SDK; please report it
-    ``bodies_dropped`` > 0      payloads that were not valid UTF-8
     ==========================  ==================================================
     """
 
@@ -71,18 +72,16 @@ class Stats:
     #: above zero is a bug.
     dropped_fault: int = 0
 
-    #: Payloads omitted because they were not valid UTF-8, which the wire
+    #: Messages whose body or frame was not valid UTF-8, which the wire
     #: contract requires.
     #:
-    #: Not part of :attr:`total_dropped`, because it does not count lost
-    #: messages: an OCPI exchange still ships without the offending body,
-    #: carrying its method, URL, status and headers. An OCPP frame is the
-    #: exception, since ``event_type`` 2 requires one, so that message is
-    #: dropped as well and counted in ``dropped_oversize``.
+    #: The whole message goes, not just the offending body: an exchange
+    #: that arrives without the payload it describes is harder for a
+    #: consumer to reason about than one that never arrives.
     #:
     #: Both protocols are JSON over UTF-8, so any value above zero means
     #: something upstream is sending payloads the protocol does not allow.
-    bodies_dropped: int = 0
+    dropped_invalid_body: int = 0
 
     #: How many messages are awaiting delivery now.
     buffered_messages: int = 0
@@ -94,6 +93,7 @@ class Stats:
         """The sum of every ``dropped_*`` counter."""
         return (
             self.dropped_invalid
+            + self.dropped_invalid_body
             + self.dropped_oversize
             + self.dropped_evicted
             + self.dropped_undeliverable
@@ -113,8 +113,8 @@ class Stats:
             dropped_oversize=self.dropped_oversize - previous.dropped_oversize,
             dropped_evicted=self.dropped_evicted - previous.dropped_evicted,
             dropped_undeliverable=self.dropped_undeliverable - previous.dropped_undeliverable,
+            dropped_invalid_body=self.dropped_invalid_body - previous.dropped_invalid_body,
             dropped_fault=self.dropped_fault - previous.dropped_fault,
-            bodies_dropped=self.bodies_dropped - previous.bodies_dropped,
             buffered_messages=self.buffered_messages,
             buffer_bytes=self.buffer_bytes,
         )
@@ -126,11 +126,11 @@ class Stats:
     _LOG_KEYS = (
         ("captured", "captured"),
         ("invalid_identity", "dropped_invalid"),
+        ("invalid_body", "dropped_invalid_body"),
         ("oversize", "dropped_oversize"),
         ("evicted", "dropped_evicted"),
         ("undeliverable", "dropped_undeliverable"),
         ("fault", "dropped_fault"),
-        ("bodies_dropped", "bodies_dropped"),
     )
 
     def log_line(self) -> str:
@@ -148,6 +148,7 @@ class Stats:
 #: to its field, so adding a reason is one line here and one on Stats.
 _FIELD_FOR_REASON = {
     DropReason.INVALID_IDENTITY: "dropped_invalid",
+    DropReason.INVALID_BODY: "dropped_invalid_body",
     DropReason.OVERSIZE: "dropped_oversize",
     DropReason.EVICTED: "dropped_evicted",
     DropReason.UNDELIVERABLE: "dropped_undeliverable",
@@ -176,17 +177,6 @@ class Counters:
     def count_captured(self) -> None:
         with self._lock:
             self._values["captured"] += 1
-
-    def count_bodies_dropped(self, n: int) -> None:
-        """Charge ``n`` omitted bodies.
-
-        Separate from :meth:`count_drop` because the reasons there all cost
-        a whole message.
-        """
-        if n <= 0:
-            return
-        with self._lock:
-            self._values["bodies_dropped"] += n
 
     def count_drop(self, reason: DropReason, n: int = 1) -> None:
         """Charge ``n`` messages to the counter for ``reason``.

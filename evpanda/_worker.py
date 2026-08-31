@@ -171,10 +171,7 @@ class Worker:
 
     def capture_ocpi(self, message: OCPIMessage, redact: OCPIRedactor | None) -> None:
         """The producer entry point for OCPI; see :func:`prepare_ocpi`."""
-        envelope, reason, bodies_dropped = prepare_ocpi(
-            message, redact, self._config.max_capture_bytes
-        )
-        self._counters.count_bodies_dropped(bodies_dropped)
+        envelope, reason = prepare_ocpi(message, redact, self._config.max_capture_bytes)
         if envelope is None:
             self._counters.count_drop(reason)
             return
@@ -182,10 +179,7 @@ class Worker:
 
     def capture_ocpp(self, message: OCPPMessage, redact: OCPPRedactor | None = None) -> None:
         """The producer entry point for OCPP; see :func:`prepare_ocpp`."""
-        envelope, reason, bodies_dropped = prepare_ocpp(
-            message, redact, self._config.max_capture_bytes
-        )
-        self._counters.count_bodies_dropped(bodies_dropped)
+        envelope, reason = prepare_ocpp(message, redact, self._config.max_capture_bytes)
         if envelope is None:
             self._counters.count_drop(reason)
             return
@@ -289,37 +283,30 @@ class Worker:
 
 def prepare_ocpi(
     message: OCPIMessage, redact: OCPIRedactor | None, max_capture_bytes: int
-) -> tuple[BufferedMessage | None, DropReason, int]:
+) -> tuple[BufferedMessage | None, DropReason]:
     """Validate the identity, enforce the body cap, take ownership, redact.
 
     An oversize body on either side drops the whole message — half a body
     is broken JSON, and it would defeat the credentials redactor.
 
-    The third element is how many bodies were omitted for not being valid
-    UTF-8.
     """
     if not valid_platform(message.identity):
-        return None, DropReason.INVALID_IDENTITY, 0
+        return None, DropReason.INVALID_IDENTITY
 
     source = message.data
     request_body = coerce_body(source.request_body)
     response_body = coerce_body(source.response_body)
     if len(request_body or b"") > max_capture_bytes:
-        return None, DropReason.OVERSIZE, 0
+        return None, DropReason.OVERSIZE
     if len(response_body or b"") > max_capture_bytes:
-        return None, DropReason.OVERSIZE, 0
+        return None, DropReason.OVERSIZE
 
     # A body that is not valid UTF-8 cannot travel: the wire contract
-    # carries it as text. Drop the body, keep the exchange — method, URL,
-    # status and headers are still worth having, and the counter says the
-    # body went missing on purpose.
-    bodies_dropped = 0
-    if not is_utf8(request_body):
-        request_body = None
-        bodies_dropped += 1
-    if not is_utf8(response_body):
-        response_body = None
-        bodies_dropped += 1
+    # carries it as text. The whole message goes, not just the body — an
+    # exchange that arrives without the payload it describes is harder for
+    # a consumer to reason about than one that never arrives.
+    if not is_utf8(request_body) or not is_utf8(response_body):
+        return None, DropReason.INVALID_BODY
 
     # Take ownership before redacting. From here the exchange is the SDK's,
     # so the redactor may rewrite it in place, and the host may reuse or
@@ -335,38 +322,34 @@ def prepare_ocpi(
     )
     if redact is not None:
         message = redact(message)
-    return BufferedMessage(captured_at=now_iso(), message=message), DropReason.NONE, bodies_dropped
+    return BufferedMessage(captured_at=now_iso(), message=message), DropReason.NONE
 
 
 def prepare_ocpp(
     message: OCPPMessage, redact: OCPPRedactor | None, max_capture_bytes: int
-) -> tuple[BufferedMessage | None, DropReason, int]:
+) -> tuple[BufferedMessage | None, DropReason]:
     """Validate the identity and enforce the frame cap.
 
     A message event with no frame or no direction is dropped: the ingestion
     contract requires both on ``event_type`` 2.
     """
     if not valid_charger(message.identity):
-        return None, DropReason.INVALID_IDENTITY, 0
+        return None, DropReason.INVALID_IDENTITY
 
     payload = coerce_body(message.payload)
     if len(payload or b"") > max_capture_bytes:
-        return None, DropReason.OVERSIZE, 0
+        return None, DropReason.OVERSIZE
     if message.event_type is OCPPEventType.MESSAGE and (not payload or not message.direction):
-        return None, DropReason.OVERSIZE, 0
-    # Unlike an OCPI body, a frame is the whole message: ``event_type`` 2
-    # requires one, so a frame that is not valid UTF-8 takes the message
-    # with it. It is counted twice on purpose, once as the body that went
-    # missing and once as the message that did.
+        return None, DropReason.OVERSIZE
     if not is_utf8(payload):
-        return None, DropReason.OVERSIZE, 1
+        return None, DropReason.INVALID_BODY
 
     message.payload = payload
     # None is the normal case for OCPP: there is nothing to redact, so
     # there is no redactor rather than one that does nothing.
     if redact is not None:
         message = redact(message)
-    return BufferedMessage(captured_at=now_iso(), message=message), DropReason.NONE, 0
+    return BufferedMessage(captured_at=now_iso(), message=message), DropReason.NONE
 
 
 def is_utf8(body: bytes | None) -> bool:

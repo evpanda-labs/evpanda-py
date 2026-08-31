@@ -62,7 +62,7 @@ def ocpi(**overrides: Any) -> OCPIMessage:
 
 
 def test_prepare_ocpi_accepts_a_good_message() -> None:
-    envelope, reason, _ = prepare_ocpi(ocpi(), None, CAP)
+    envelope, reason = prepare_ocpi(ocpi(), None, CAP)
     assert reason is DropReason.NONE
     assert envelope is not None
     assert envelope.captured_at.endswith("Z")
@@ -80,14 +80,14 @@ def test_prepare_ocpi_accepts_a_good_message() -> None:
 def test_prepare_ocpi_drops_an_invalid_identity(identity: Platform) -> None:
     message = ocpi()
     message.identity = identity
-    envelope, reason, _ = prepare_ocpi(message, None, CAP)
+    envelope, reason = prepare_ocpi(message, None, CAP)
     assert envelope is None
     assert reason is DropReason.INVALID_IDENTITY
 
 
 def test_prepare_ocpi_drops_an_oversize_body() -> None:
     for field in ("request_body", "response_body"):
-        envelope, reason, _ = prepare_ocpi(ocpi(**{field: b"x" * (CAP + 1)}), None, CAP)
+        envelope, reason = prepare_ocpi(ocpi(**{field: b"x" * (CAP + 1)}), None, CAP)
         assert envelope is None
         assert reason is DropReason.OVERSIZE
 
@@ -99,11 +99,11 @@ def test_an_absent_identity_is_invalid_not_a_fault() -> None:
     """
     message = ocpi()
     message.identity = None  # type: ignore[assignment]
-    assert prepare_ocpi(message, None, CAP) == (None, DropReason.INVALID_IDENTITY, 0)
+    assert prepare_ocpi(message, None, CAP) == (None, DropReason.INVALID_IDENTITY)
 
     frame = ocpp()
     frame.identity = None  # type: ignore[assignment]
-    assert prepare_ocpp(frame, None, CAP) == (None, DropReason.INVALID_IDENTITY, 0)
+    assert prepare_ocpp(frame, None, CAP) == (None, DropReason.INVALID_IDENTITY)
 
 
 def test_a_tenant_pair_is_all_or_nothing() -> None:
@@ -120,7 +120,7 @@ def test_the_chokepoint_takes_ownership() -> None:
     body = bytearray(b'{"id":"cdr-1"}')
     message = ocpi(request_headers=headers, request_body=body)
 
-    envelope, _, _ = prepare_ocpi(message, None, CAP)
+    envelope, _ = prepare_ocpi(message, None, CAP)
     assert envelope is not None
     headers["content-type"] = "text/plain"
     headers["authorization"] = "Token secret"
@@ -132,21 +132,21 @@ def test_the_chokepoint_takes_ownership() -> None:
 
 
 def test_a_string_body_is_encoded_as_utf8() -> None:
-    envelope, _, _ = prepare_ocpi(ocpi(request_body="héllo"), None, CAP)
+    envelope, _ = prepare_ocpi(ocpi(request_body="héllo"), None, CAP)
     assert envelope is not None
     assert envelope.message.data.request_body == "héllo".encode()
 
 
 def test_prepare_runs_the_redactor() -> None:
     message = ocpi(request_headers={"authorization": "Token secret", "accept": "*/*"})
-    envelope, _, _ = prepare_ocpi(message, make_ocpi_redactor(), CAP)
+    envelope, _ = prepare_ocpi(message, make_ocpi_redactor(), CAP)
     assert envelope is not None
     assert envelope.message.data.request_headers == {"accept": "*/*"}
 
 
 def test_prepare_skips_a_missing_redactor() -> None:
     message = ocpi(request_headers={"authorization": "Token secret"})
-    envelope, _, _ = prepare_ocpi(message, None, CAP)
+    envelope, _ = prepare_ocpi(message, None, CAP)
     assert envelope is not None
     assert envelope.message.data.request_headers == {"authorization": "Token secret"}
 
@@ -156,7 +156,7 @@ def test_a_redactor_may_rewrite_in_place() -> None:
         message.data.url = "/redacted"
         return message
 
-    envelope, _, _ = prepare_ocpi(ocpi(), redact, CAP)
+    envelope, _ = prepare_ocpi(ocpi(), redact, CAP)
     assert envelope is not None
     assert envelope.message.data.url == "/redacted"
 
@@ -181,74 +181,65 @@ def ocpp(**overrides: Any) -> OCPPMessage:
     return OCPPMessage(**fields)
 
 
-def test_an_ocpi_body_that_is_not_utf8_is_dropped_but_the_exchange_survives() -> None:
-    """A body the wire contract cannot carry as text goes, and the exchange
-    around it stays: method, URL, status and headers are still worth having.
+def test_an_ocpi_message_with_a_body_that_is_not_utf8_is_dropped() -> None:
+    """The whole message goes, not just the body: an exchange that arrives
+    without the payload it describes is harder to reason about downstream.
     """
     message = ocpi(request_body=b"\xff\xfe\x00\x01", response_body=b'{"status_code":1000}')
-    envelope, reason, bodies_dropped = prepare_ocpi(message, None, CAP)
-
-    assert reason is DropReason.NONE
-    assert bodies_dropped == 1
-    assert envelope is not None
-    assert envelope.message.data.request_body is None
-    # The good half is untouched.
-    assert envelope.message.data.response_body == b'{"status_code":1000}'
-    assert envelope.message.data.url == "/ocpi/2.2/cdrs"
-
-
-def test_an_ocpp_frame_that_is_not_utf8_takes_the_message_with_it() -> None:
-    """``event_type`` 2 requires a frame, so there is no message left to
-    ship. It is counted twice: as the body, and as the message.
-    """
-    envelope, reason, bodies_dropped = prepare_ocpp(ocpp(payload=b"\xff\xfe\x00\x01"), None, CAP)
+    envelope, reason = prepare_ocpi(message, None, CAP)
 
     assert envelope is None
-    assert reason is DropReason.OVERSIZE
-    assert bodies_dropped == 1
+    assert reason is DropReason.INVALID_BODY
 
 
-def test_the_counters_see_a_dropped_body() -> None:
-    """The whole point of the counter: an operator can tell that payloads
-    are being omitted without reading the wire.
+def test_an_ocpp_frame_that_is_not_utf8_drops_the_message() -> None:
+    envelope, reason = prepare_ocpp(ocpp(payload=b"\xff\xfe\x00\x01"), None, CAP)
+
+    assert envelope is None
+    assert reason is DropReason.INVALID_BODY
+
+
+def test_the_counters_see_an_invalid_body() -> None:
+    """The point of the counter: an operator can tell that payloads are
+    being rejected without reading the wire.
     """
     worker, _, counters = build_worker()
     worker.capture_ocpi(ocpi(request_body=b"\xff\xfe"), None)
 
     stats = counters.snapshot()
-    assert stats.bodies_dropped == 1
-    assert stats.captured == 1  # the exchange still shipped
-    assert stats.total_dropped == 0  # no message was lost
+    assert stats.dropped_invalid_body == 1
+    assert stats.captured == 0
+    assert stats.total_dropped == 1
 
 
 def test_prepare_ocpp_accepts_a_good_frame() -> None:
-    envelope, reason, _ = prepare_ocpp(ocpp(), None, CAP)
+    envelope, reason = prepare_ocpp(ocpp(), None, CAP)
     assert reason is DropReason.NONE
     assert envelope is not None
 
 
 def test_prepare_ocpp_drops_an_invalid_identity() -> None:
-    envelope, reason, _ = prepare_ocpp(ocpp(identity=Charger(id="")), None, CAP)
+    envelope, reason = prepare_ocpp(ocpp(identity=Charger(id="")), None, CAP)
     assert envelope is None
     assert reason is DropReason.INVALID_IDENTITY
 
 
 def test_prepare_ocpp_drops_an_oversize_frame() -> None:
-    envelope, reason, _ = prepare_ocpp(ocpp(payload=b"x" * (CAP + 1)), None, CAP)
+    envelope, reason = prepare_ocpp(ocpp(payload=b"x" * (CAP + 1)), None, CAP)
     assert envelope is None
     assert reason is DropReason.OVERSIZE
 
 
 @pytest.mark.parametrize("missing", [{"payload": None}, {"direction": None}])
 def test_a_message_event_needs_a_frame_and_a_direction(missing: dict[str, Any]) -> None:
-    envelope, reason, _ = prepare_ocpp(ocpp(**missing), None, CAP)
+    envelope, reason = prepare_ocpp(ocpp(**missing), None, CAP)
     assert envelope is None
     assert reason is DropReason.OVERSIZE
 
 
 def test_connect_and_disconnect_carry_no_frame() -> None:
     for event in (OCPPEventType.CONNECT, OCPPEventType.DISCONNECT):
-        envelope, reason, _ = prepare_ocpp(
+        envelope, reason = prepare_ocpp(
             ocpp(event_type=event, payload=None, direction=None), None, CAP
         )
         assert reason is DropReason.NONE
@@ -256,7 +247,7 @@ def test_connect_and_disconnect_carry_no_frame() -> None:
 
 
 def test_ocpp_frames_may_be_strings() -> None:
-    envelope, _, _ = prepare_ocpp(ocpp(payload='[2,"1","Heartbeat",{}]'), None, CAP)
+    envelope, _ = prepare_ocpp(ocpp(payload='[2,"1","Heartbeat",{}]'), None, CAP)
     assert envelope is not None
     assert envelope.message.payload == b'[2,"1","Heartbeat",{}]'
 
@@ -266,7 +257,7 @@ def test_the_ocpp_redactor_seam_is_optional() -> None:
         message.payload = b"masked"
         return message
 
-    envelope, _, _ = prepare_ocpp(ocpp(), redact, CAP)
+    envelope, _ = prepare_ocpp(ocpp(), redact, CAP)
     assert envelope is not None
     assert envelope.message.payload == b"masked"
 
