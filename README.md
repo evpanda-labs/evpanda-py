@@ -377,9 +377,7 @@ on a request path.
 
 ## Documentation
 
-- [Architecture and design notes](https://claude.ai/code/artifact/d6759cc2-ff5f-4279-ad63-c2738222f8f8)
-  — how it works, and why. The source lives in the Obsidian vault at
-  `engineering/SDKs/design-docs/`, not in this repo: it is knowledge
-  about the code rather than part of what ships
 - [evpanda-go](https://github.com/evpanda-labs/evpanda-go) — the reference
   implementation this SDK tracks
+- [evpanda-node](https://github.com/evpanda-labs/evpanda-node) — the Node SDK,
+  same pipeline and the same wire records
