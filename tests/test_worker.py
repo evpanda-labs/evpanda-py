@@ -181,6 +181,37 @@ def ocpp(**overrides: Any) -> OCPPMessage:
     return OCPPMessage(**fields)
 
 
+def test_an_ocpi_message_with_a_body_that_is_not_utf8_is_dropped() -> None:
+    """The whole message goes, not just the body: an exchange that arrives
+    without the payload it describes is harder to reason about downstream.
+    """
+    message = ocpi(request_body=b"\xff\xfe\x00\x01", response_body=b'{"status_code":1000}')
+    envelope, reason = prepare_ocpi(message, None, CAP)
+
+    assert envelope is None
+    assert reason is DropReason.INVALID_BODY
+
+
+def test_an_ocpp_frame_that_is_not_utf8_drops_the_message() -> None:
+    envelope, reason = prepare_ocpp(ocpp(payload=b"\xff\xfe\x00\x01"), None, CAP)
+
+    assert envelope is None
+    assert reason is DropReason.INVALID_BODY
+
+
+def test_the_counters_see_an_invalid_body() -> None:
+    """The point of the counter: an operator can tell that payloads are
+    being rejected without reading the wire.
+    """
+    worker, _, counters = build_worker()
+    worker.capture_ocpi(ocpi(request_body=b"\xff\xfe"), None)
+
+    stats = counters.snapshot()
+    assert stats.dropped_invalid_body == 1
+    assert stats.captured == 0
+    assert stats.total_dropped == 1
+
+
 def test_prepare_ocpp_accepts_a_good_frame() -> None:
     envelope, reason = prepare_ocpp(ocpp(), None, CAP)
     assert reason is DropReason.NONE

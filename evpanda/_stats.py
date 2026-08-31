@@ -26,6 +26,7 @@ class DropReason(Enum):
 
     NONE = "none"
     INVALID_IDENTITY = "invalid_identity"
+    INVALID_BODY = "invalid_body"
     OVERSIZE = "oversize"
     EVICTED = "evicted"
     UNDELIVERABLE = "undeliverable"
@@ -50,6 +51,7 @@ class Stats:
     ``dropped_evicted`` high    upstream can't keep up, or the buffer is
                                 undersized for the traffic
     ``dropped_undeliverable``   network, API key, or ingestion fault
+    ``dropped_invalid_body``    a body or frame that was not valid UTF-8
     ``dropped_fault`` > 0       a bug in the SDK; please report it
     ==========================  ==================================================
     """
@@ -70,6 +72,17 @@ class Stats:
     #: above zero is a bug.
     dropped_fault: int = 0
 
+    #: Messages whose body or frame was not valid UTF-8, which the wire
+    #: contract requires.
+    #:
+    #: The whole message goes, not just the offending body: an exchange
+    #: that arrives without the payload it describes is harder for a
+    #: consumer to reason about than one that never arrives.
+    #:
+    #: Both protocols are JSON over UTF-8, so any value above zero means
+    #: something upstream is sending payloads the protocol does not allow.
+    dropped_invalid_body: int = 0
+
     #: How many messages are awaiting delivery now.
     buffered_messages: int = 0
     #: Their accounted footprint, always at or below ``max_buffer_bytes``.
@@ -80,6 +93,7 @@ class Stats:
         """The sum of every ``dropped_*`` counter."""
         return (
             self.dropped_invalid
+            + self.dropped_invalid_body
             + self.dropped_oversize
             + self.dropped_evicted
             + self.dropped_undeliverable
@@ -99,6 +113,7 @@ class Stats:
             dropped_oversize=self.dropped_oversize - previous.dropped_oversize,
             dropped_evicted=self.dropped_evicted - previous.dropped_evicted,
             dropped_undeliverable=self.dropped_undeliverable - previous.dropped_undeliverable,
+            dropped_invalid_body=self.dropped_invalid_body - previous.dropped_invalid_body,
             dropped_fault=self.dropped_fault - previous.dropped_fault,
             buffered_messages=self.buffered_messages,
             buffer_bytes=self.buffer_bytes,
@@ -111,6 +126,7 @@ class Stats:
     _LOG_KEYS = (
         ("captured", "captured"),
         ("invalid_identity", "dropped_invalid"),
+        ("invalid_body", "dropped_invalid_body"),
         ("oversize", "dropped_oversize"),
         ("evicted", "dropped_evicted"),
         ("undeliverable", "dropped_undeliverable"),
@@ -132,6 +148,7 @@ class Stats:
 #: to its field, so adding a reason is one line here and one on Stats.
 _FIELD_FOR_REASON = {
     DropReason.INVALID_IDENTITY: "dropped_invalid",
+    DropReason.INVALID_BODY: "dropped_invalid_body",
     DropReason.OVERSIZE: "dropped_oversize",
     DropReason.EVICTED: "dropped_evicted",
     DropReason.UNDELIVERABLE: "dropped_undeliverable",

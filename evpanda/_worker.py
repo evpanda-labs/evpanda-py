@@ -288,6 +288,7 @@ def prepare_ocpi(
 
     An oversize body on either side drops the whole message — half a body
     is broken JSON, and it would defeat the credentials redactor.
+
     """
     if not valid_platform(message.identity):
         return None, DropReason.INVALID_IDENTITY
@@ -299,6 +300,13 @@ def prepare_ocpi(
         return None, DropReason.OVERSIZE
     if len(response_body or b"") > max_capture_bytes:
         return None, DropReason.OVERSIZE
+
+    # A body that is not valid UTF-8 cannot travel: the wire contract
+    # carries it as text. The whole message goes, not just the body — an
+    # exchange that arrives without the payload it describes is harder for
+    # a consumer to reason about than one that never arrives.
+    if not is_utf8(request_body) or not is_utf8(response_body):
+        return None, DropReason.INVALID_BODY
 
     # Take ownership before redacting. From here the exchange is the SDK's,
     # so the redactor may rewrite it in place, and the host may reuse or
@@ -333,6 +341,8 @@ def prepare_ocpp(
         return None, DropReason.OVERSIZE
     if message.event_type is OCPPEventType.MESSAGE and (not payload or not message.direction):
         return None, DropReason.OVERSIZE
+    if not is_utf8(payload):
+        return None, DropReason.INVALID_BODY
 
     message.payload = payload
     # None is the normal case for OCPP: there is nothing to redact, so
@@ -340,6 +350,21 @@ def prepare_ocpp(
     if redact is not None:
         message = redact(message)
     return BufferedMessage(captured_at=now_iso(), message=message), DropReason.NONE
+
+
+def is_utf8(body: bytes | None) -> bool:
+    """Whether ``body`` is valid UTF-8, which the wire contract requires.
+
+    ``bytes.decode`` walks the buffer once in C and raises on the first
+    invalid sequence, which is cheaper than any check written in Python.
+    """
+    if not body:
+        return True
+    try:
+        body.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
 
 
 def header_map(headers: Mapping[str, Any] | None) -> dict[str, str]:

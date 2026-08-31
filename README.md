@@ -116,6 +116,16 @@ panda.capture_inbound_message(
 )
 ```
 
+Bodies travel as UTF-8 text, with `request_body_encoding` and
+`response_body_encoding` naming the encoding alongside them. Both protocols are
+JSON over UTF-8, so that is always `"utf8"` today; the contract reserves
+`"base64"` for payloads that are not text.
+
+A message whose body is not valid UTF-8 is dropped rather than shipped as
+mojibake, and counted in `dropped_invalid_body`. The whole message goes, not
+just the body: an exchange that arrives without the payload it describes is
+harder to reason about than one that never arrives.
+
 `status_code` and both bodies are optional; the header mappings may be left
 empty. Bodies are `bytes` (a `str` is encoded as UTF-8), and since `bytes` is
 immutable the SDK never has to copy what you hand it — a `bytearray` or
@@ -325,8 +335,10 @@ safe on an inert or closed client. Each counter maps to one root cause:
 
 ```python
 stats = panda.stats()
-# Stats(captured=40120, invalid_identity=0, oversize=0, evicted=9402,
-#       undeliverable=0, fault=0, buffered_messages=2, buffer_bytes=528)
+# Stats(captured=40120, dropped_invalid=0, dropped_oversize=0,
+#       dropped_invalid_body=0, dropped_evicted=9402,
+#       dropped_undeliverable=0, dropped_fault=0,
+#       buffered_messages=2, buffer_bytes=528)
 ```
 
 | Counter | What a high value means |
@@ -336,6 +348,7 @@ stats = panda.stats()
 | `dropped_oversize` | Bodies exceed `max_capture_bytes` |
 | `dropped_evicted` | Upstream can't keep up, or the buffer is undersized |
 | `dropped_undeliverable` | Network, API key, or ingestion fault |
+| `dropped_invalid_body` | A body or frame that was not valid UTF-8 |
 | `dropped_fault` | A bug in the SDK — please report it |
 
 It is a pull-based snapshot, so it feeds Prometheus, OpenTelemetry or a log
@@ -364,9 +377,7 @@ on a request path.
 
 ## Documentation
 
-- [Architecture and design notes](https://claude.ai/code/artifact/d6759cc2-ff5f-4279-ad63-c2738222f8f8)
-  — how it works, and why. The source lives in the Obsidian vault at
-  `engineering/SDKs/design-docs/`, not in this repo: it is knowledge
-  about the code rather than part of what ships
 - [evpanda-go](https://github.com/evpanda-labs/evpanda-go) — the reference
   implementation this SDK tracks
+- [evpanda-node](https://github.com/evpanda-labs/evpanda-node) — the Node SDK,
+  same pipeline and the same wire records

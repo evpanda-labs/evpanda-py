@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import subprocess
 import sys
@@ -41,7 +40,8 @@ def test_an_inbound_ocpi_exchange_arrives_intact(ingest: IngestServer) -> None:
     assert record["http_method"] == "POST"
     assert record["url"] == "/ocpi/2.2/cdrs"
     assert record["response_status_code"] == 201
-    assert base64.standard_b64decode(record["request_body"]) == b'{"id":"cdr-1"}'
+    assert record["request_body"] == '{"id":"cdr-1"}'
+    assert record["request_body_encoding"] == "utf8"
     assert record["captured_at"].endswith("Z")
 
 
@@ -74,7 +74,7 @@ def test_secrets_never_reach_the_wire(ingest: IngestServer) -> None:
 
     record = ingest.wait_for_messages(1)[0]
     assert record["request_headers"] == {"accept": "*/*"}
-    body = json.loads(base64.standard_b64decode(record["request_body"]))
+    body = json.loads(record["request_body"])
     assert body == {"token": "[redacted]"}
 
 
@@ -91,7 +91,9 @@ def test_an_ocpp_session_arrives_as_three_events(ingest: IngestServer) -> None:
     messages = ingest.wait_for_messages(3)
     assert [m["event_type"] for m in messages] == [1, 2, 0]
     assert messages[1]["direction"] == "FROM_CP"
-    assert base64.standard_b64decode(messages[1]["raw_frame"]) == b'[2,"1","Heartbeat",{}]'
+    assert messages[1]["raw_frame"] == '[2,"1","Heartbeat",{}]'
+    assert messages[1]["raw_frame_encoding"] == "utf8"
+    assert messages[0]["raw_frame_encoding"] is None
     assert messages[0]["raw_frame"] is None
     assert messages[0]["charger_id"] == "CP-001"
 
