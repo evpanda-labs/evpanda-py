@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import time
 from typing import Any
@@ -92,9 +91,11 @@ def test_the_ocpi_wire_shape() -> None:
                 "url": "/ocpi/2.2/cdrs",
                 "response_status_code": 201,
                 "request_headers": {"content-type": "application/json"},
-                "request_body": base64.standard_b64encode(b'{"id":"cdr-1"}').decode(),
+                "request_body": '{"id":"cdr-1"}',
+                "request_body_encoding": "utf8",
                 "response_headers": None,
                 "response_body": None,
+                "response_body_encoding": None,
             }
         ]
     }
@@ -112,7 +113,8 @@ def test_the_ocpp_wire_shape() -> None:
                 "captured_at": STAMP,
                 "event_type": 2,
                 "direction": "FROM_CP",
-                "raw_frame": base64.standard_b64encode(b'[2,"1","Heartbeat",{}]').decode(),
+                "raw_frame": '[2,"1","Heartbeat",{}]',
+                "raw_frame_encoding": "utf8",
             }
         ]
     }

@@ -51,6 +51,7 @@ class Stats:
                                 undersized for the traffic
     ``dropped_undeliverable``   network, API key, or ingestion fault
     ``dropped_fault`` > 0       a bug in the SDK; please report it
+    ``bodies_dropped`` > 0      payloads that were not valid UTF-8
     ==========================  ==================================================
     """
 
@@ -69,6 +70,19 @@ class Stats:
     #: Captures lost to a swallowed exception inside the SDK. Any value
     #: above zero is a bug.
     dropped_fault: int = 0
+
+    #: Payloads omitted because they were not valid UTF-8, which the wire
+    #: contract requires.
+    #:
+    #: Not part of :attr:`total_dropped`, because it does not count lost
+    #: messages: an OCPI exchange still ships without the offending body,
+    #: carrying its method, URL, status and headers. An OCPP frame is the
+    #: exception, since ``event_type`` 2 requires one, so that message is
+    #: dropped as well and counted in ``dropped_oversize``.
+    #:
+    #: Both protocols are JSON over UTF-8, so any value above zero means
+    #: something upstream is sending payloads the protocol does not allow.
+    bodies_dropped: int = 0
 
     #: How many messages are awaiting delivery now.
     buffered_messages: int = 0
@@ -100,6 +114,7 @@ class Stats:
             dropped_evicted=self.dropped_evicted - previous.dropped_evicted,
             dropped_undeliverable=self.dropped_undeliverable - previous.dropped_undeliverable,
             dropped_fault=self.dropped_fault - previous.dropped_fault,
+            bodies_dropped=self.bodies_dropped - previous.bodies_dropped,
             buffered_messages=self.buffered_messages,
             buffer_bytes=self.buffer_bytes,
         )
@@ -115,6 +130,7 @@ class Stats:
         ("evicted", "dropped_evicted"),
         ("undeliverable", "dropped_undeliverable"),
         ("fault", "dropped_fault"),
+        ("bodies_dropped", "bodies_dropped"),
     )
 
     def log_line(self) -> str:
@@ -160,6 +176,17 @@ class Counters:
     def count_captured(self) -> None:
         with self._lock:
             self._values["captured"] += 1
+
+    def count_bodies_dropped(self, n: int) -> None:
+        """Charge ``n`` omitted bodies.
+
+        Separate from :meth:`count_drop` because the reasons there all cost
+        a whole message.
+        """
+        if n <= 0:
+            return
+        with self._lock:
+            self._values["bodies_dropped"] += n
 
     def count_drop(self, reason: DropReason, n: int = 1) -> None:
         """Charge ``n`` messages to the counter for ``reason``.

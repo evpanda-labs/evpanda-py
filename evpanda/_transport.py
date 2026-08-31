@@ -13,7 +13,6 @@ the way an enterprise deployment expects.
 
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import random
@@ -108,8 +107,13 @@ class OCPIIngest(TypedDict):
     response_status_code: int | None
     request_headers: dict[str, str] | None
     request_body: str | None
+    #: How ``request_body`` is encoded: None when there is no body, "utf8"
+    #: otherwise. The contract reserves "base64" for payloads that are not
+    #: text, which neither protocol produces today.
+    request_body_encoding: str | None
     response_headers: dict[str, str] | None
     response_body: str | None
+    response_body_encoding: str | None
 
 
 class OCPPIngest(TypedDict):
@@ -121,23 +125,41 @@ class OCPPIngest(TypedDict):
     event_type: int
     direction: str | None
     raw_frame: str | None
+    #: How ``raw_frame`` is encoded, on the same terms as the OCPI bodies.
+    raw_frame_encoding: str | None
 
 
 class IngestBody(TypedDict):
     messages: list[OCPIIngest | OCPPIngest]
 
 
-def _body_b64(body: bytes | None) -> str | None:
-    """base64-encode a body or frame, or None to send null when empty.
+#: The only body encoding the SDK emits. The contract also defines
+#: "base64", for payloads that are not text; nothing in OCPI 2.2.1 or
+#: OCPP 1.6-J produces one, so the SDK drops such a body rather than
+#: encoding it.
+ENCODING_UTF8 = "utf8"
 
-    Every byte payload the SDK ships goes through this — OCPI HTTP bodies
-    and OCPP wire frames alike. The ingest server decodes before
-    persistence, so consumers see plain UTF-8; encoding keeps the wire
-    contract uniform across protocols and binary-safe.
+
+def _body_text(body: bytes | None) -> str | None:
+    """Render a body or frame as the UTF-8 text the wire contract carries,
+    or None to send null when there is nothing to send.
+
+    No encoding step: both protocols are JSON over UTF-8, so a body is
+    already text by the time it gets here. The capture chokepoint drops any
+    body that is not valid UTF-8 (see ``_prepare_ocpi`` and
+    ``_prepare_ocpp``), which is what lets this decode never fail.
     """
     if not body:
         return None
-    return base64.standard_b64encode(body).decode("ascii")
+    return body.decode("utf-8")
+
+
+def _body_encoding(body: bytes | None) -> str | None:
+    """Name the encoding of a body, or None when there is no body to
+    describe. Sending it explicitly keeps the record self-describing: a
+    reader never has to infer the encoding from the bytes.
+    """
+    return ENCODING_UTF8 if body else None
 
 
 def _opt_str(value: str | None) -> str | None:
@@ -166,9 +188,11 @@ def record(envelope: BufferedMessage) -> OCPIIngest | OCPPIngest:
             url=data.url,
             response_status_code=_opt_int(data.status_code),
             request_headers=dict(data.request_headers) or None,
-            request_body=_body_b64(coerce_body(data.request_body)),
+            request_body=_body_text(coerce_body(data.request_body)),
+            request_body_encoding=_body_encoding(coerce_body(data.request_body)),
             response_headers=dict(data.response_headers) or None,
-            response_body=_body_b64(coerce_body(data.response_body)),
+            response_body=_body_text(coerce_body(data.response_body)),
+            response_body_encoding=_body_encoding(coerce_body(data.response_body)),
         )
     return OCPPIngest(
         charger_id=message.identity.id,
@@ -178,7 +202,8 @@ def record(envelope: BufferedMessage) -> OCPIIngest | OCPPIngest:
         captured_at=envelope.captured_at,
         event_type=int(message.event_type),
         direction=_opt_str(message.direction),
-        raw_frame=_body_b64(coerce_body(message.payload)),
+        raw_frame=_body_text(coerce_body(message.payload)),
+        raw_frame_encoding=_body_encoding(coerce_body(message.payload)),
     )
 
 
